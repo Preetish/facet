@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.wrangler/
+.next/
+coverage/
+package-lock.json
+*.tsbuildinfo
+LICENSE
+AGENTS.md
