@@ -1,0 +1,119 @@
+# Facet v1 configuration for the Meridian Cloud example site.
+# Validate locally:  npx facet validate examples/basic-site/facet.yaml
+# Preview locally:   npx facet preview --target http://127.0.0.1:4000 --config examples/basic-site/facet.yaml
+
+version: 1
+
+settings:
+  # First-party cookie storing the visitor's sticky deterministic bucketing ID
+  cookieName: "__facet_vid"
+  # Query parameters used for HMAC-signed shareable production preview links
+  previewParam: "__facet_preview"
+  previewSigParam: "__facet_sig"
+
+  # Emit minimal exposure metadata ({ experience_id, bucket }) to your existing analytics
+  analytics:
+    providers: ["ga4", "umami", "posthog"]
+
+  # Optional BYOK reverse-IP / CRM enrichment guardrails (always fail-open)
+  enrichment:
+    timeoutMs: 150
+    cacheTtlSeconds: 3600
+
+  # Reusable named HTML slots referenced by `slot:` in experience changes
+  slots:
+    stripe-logos: >-
+      <div class="logo-row" aria-label="Payments & fintech customers">
+        <span class="logo-pill">Stripe Partner Ready</span>
+        <span class="logo-pill">SOC 2 Type II</span>
+        <span class="logo-pill">PCI-DSS Level 1</span>
+        <span class="logo-pill">99.995% SLA</span>
+      </div>
+    fintech-logos: >-
+      <div class="logo-row" aria-label="Fintech teams using Meridian">
+        <span class="logo-pill">Ramp</span>
+        <span class="logo-pill">Mercury</span>
+        <span class="logo-pill">Brex</span>
+        <span class="logo-pill">Plaid</span>
+      </div>
+    eu-compliance-badge: >-
+      <span>EU Data Residency &middot; Frankfurt &amp; Dublin Regions</span>
+
+experiences:
+  # 1. 1:1 ABM Link / Account Page (100% match rate, zero paid enrichment keys)
+  # Test: http://127.0.0.1:8787/?acct=stripe
+  - id: stripe-abm
+    name: "Stripe 1:1 ABM Landing Experience"
+    priority: 100
+    stopOnMatch: true
+    holdout: 0
+    match:
+      any:
+        - query.acct: ["stripe"]
+        - path: "/for/stripe"
+    changes:
+      - selector: "[data-facet-slot='hero-eyebrow']"
+        text: "Prepared for the Stripe infrastructure team"
+      - selector: "h1"
+        text: "Zero-latency edge routing built for Stripe's global scale"
+      - selector: "[data-facet-slot='hero-subhead']"
+        text: "See how Meridian pairs with global payment rails to cut p99 checkout latency by 38% with deterministic failover."
+      - selector: "[data-cta='hero']"
+        text: "Open Stripe's architecture walkthrough"
+        attrs:
+          href: "/demo?acct=stripe"
+      - selector: "#logo-strip"
+        slot: "stripe-logos"
+
+  # 2. Paid Ad Message-Match + Optional BYOK Company Industry Rule
+  # Test: http://127.0.0.1:8787/?utm_campaign=fintech-q4
+  - id: fintech-abm
+    name: "Fintech Paid Search & ABM"
+    priority: 50
+    stopOnMatch: true
+    holdout: 0.2 # Deterministic 20% sticky control group to measure real conversion lift
+    match:
+      path: "/"
+      any:
+        - utm_campaign: ["fintech-q4", "abm-banking", "pci-infra"]
+        - utm_term:
+            contains: "fintech"
+        - company.industry: ["Financial Services", "FinTech"]
+    changes:
+      - selector: "[data-facet-slot='hero-eyebrow']"
+        text: "Built for regulated fintech teams"
+      - selector: "h1"
+        text: "Compliance-ready infrastructure for fintech teams"
+      - selector: "[data-facet-slot='hero-subhead']"
+        text: "Launch SOC 2 and PCI-ready ledger workloads in days, not quarters — with immutable audit logs at the edge."
+      - selector: "[data-cta='hero']"
+        text: "See the fintech demo"
+        attrs:
+          href: "/demo?segment=fintech"
+      - selector: "#logo-strip"
+        slot: "fintech-logos"
+
+  # 3. Geo + Returning-Visitor Rule (built-in edge signals, zero API keys)
+  # Test in Preview Bar by selecting "eu-returning-visitor"
+  - id: eu-returning-visitor
+    name: "EU Returning Visitor Message"
+    priority: 10
+    stopOnMatch: true
+    holdout: 0.1
+    match:
+      path: "/"
+      all:
+        - returning: true
+        - geo.continent: "EU"
+    changes:
+      - selector: "[data-facet-slot='hero-eyebrow']"
+        slot: "eu-compliance-badge"
+        addClass: ["eyebrow--eu"]
+      - selector: "h1"
+        text: "Welcome back — EU data residency without the latency tax"
+      - selector: "[data-facet-slot='hero-subhead']"
+        text: "Keep customer telemetry inside Frankfurt and Dublin regions with native GDPR controls and zero origin rewrites."
+      - selector: "[data-cta='hero']"
+        text: "Continue your EU evaluation"
+        attrs:
+          href: "/demo?region=eu&returning=1"

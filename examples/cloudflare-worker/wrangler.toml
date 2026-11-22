@@ -1,0 +1,22 @@
+name = "facet-edge-proxy"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+
+[vars]
+# Marketing site origin to reverse-proxy (Webflow, WordPress, Ghost, Astro, static HTML, etc.)
+ORIGIN_URL = "https://your-marketing-site.webflow.io"
+
+# Optional: import facet.yaml directly as text in src/index.ts
+# [[rules]]
+# type = "Text"
+# globs = ["**/*.yaml"]
+# fallthrough = true
+
+# Optional KV namespace for caching BYOK company enrichment lookups (e.g. IPinfo)
+# [[kv_namespaces]]
+# binding = "FACET_CACHE"
+# id = "replace-with-your-kv-namespace-id"
+
+# Configure secrets via `wrangler secret put` (never commit secrets to git):
+#   wrangler secret put FACET_PREVIEW_SECRET
+#   wrangler secret put IPINFO_TOKEN
