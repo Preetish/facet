@@ -1,0 +1,30 @@
+{
+  "name": "@facet/cli",
+  "version": "0.1.0",
+  "description": "CLI and local live preview proxy for Facet",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "facet": "./dist/bin.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@facet/core": "0.1.0",
+    "html-rewriter-wasm": "^0.4.1"
+  }
+}

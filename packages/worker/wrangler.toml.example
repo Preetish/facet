@@ -1,0 +1,16 @@
+name = "facet-edge-proxy"
+main = "src/worker.ts"
+compatibility_date = "2025-04-01"
+
+[vars]
+# Marketing site origin to reverse-proxy
+ORIGIN_URL = "https://your-site.webflow.io"
+
+# Optional KV namespace for caching BYOK company enrichment lookups
+# [[kv_namespaces]]
+# binding = "FACET_CACHE"
+# id = "your-kv-namespace-id"
+
+# Configure secrets via `wrangler secret put` (never commit secrets):
+#   wrangler secret put FACET_PREVIEW_SECRET
+#   wrangler secret put IPINFO_TOKEN
