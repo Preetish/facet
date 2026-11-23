@@ -7,3 +7,6 @@ package-lock.json
 *.tsbuildinfo
 LICENSE
 AGENTS.md
+DESIGN.md
+PRODUCT.md
+.impeccable/

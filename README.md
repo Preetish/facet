@@ -1,6 +1,8 @@
 # Facet
 
-**Open-source, zero-flicker edge website personalization and ad message-match for B2B growth teams.**
+**Open-source website personalization with zero flicker. Match headlines, proof, and CTAs to every campaign.**
+
+Live site (dogfooding `@facet/next`): **[facet.preetish.me](https://facet.preetish.me)** ([try 1:1 Stripe preview](https://facet.preetish.me/?acct=stripe))
 
 Facet is a self-hosted, Apache-2.0 alternative to Mutiny. Put a Cloudflare Worker in front of any marketing site (Webflow, WordPress, Ghost, Astro, Framer static pages, or plain HTML) — or drop in the hydration-safe Next.js adapter — define segments, deterministic holdouts, and DOM swaps in a single `facet.yaml` file in git, and measure real conversion lift without a `$2,000/mo` SaaS bill or client-side flicker.
 
