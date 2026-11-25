@@ -376,4 +376,74 @@ experiences:
     expect(pageMarkup).toContain('{"experienceId":"abm-stripe","bucket":"variant"}');
     expect(pageMarkup).toContain('window.posthog.capture("facet_exposure"');
   });
+
+  it("renders interpolated {{data.*}} and {{params.*}} templates safely in <FacetSlot /> across virtual /for/:slug routes", async () => {
+    const middleware = createFacetMiddleware({
+      config: `
+version: 1
+settings:
+  analytics:
+    providers: ["ga4"]
+data:
+  accounts:
+    stripe:
+      name: "Stripe <HQ>"
+      headline: "Built for Stripe's global payments team"
+      cta: "Talk to your Stripe AE"
+      badge: "FinTech & Payments"
+experiences:
+  - id: abm-dynamic
+    name: "Dynamic ABM Account Page"
+    match:
+      path: "/for/:slug"
+    originPath: "/"
+    lookup:
+      table: accounts
+      key: "{{params.slug}}"
+    changes:
+      - selector: "#hero-headline"
+        text: "{{data.headline}} ({{params.slug}})"
+      - selector: "#account-badge"
+        html: "<strong>{{data.name}}</strong> — {{data.badge}}"
+      - selector: "[data-facet-slot='hero-cta']"
+        text: "{{data.cta}}"
+        attrs:
+          href: "/demo?acct={{params.slug}}&org={{data.name}}"
+`,
+      generateVisitorId: () => "vis_tpl_1",
+    });
+
+    const res = await middleware(new NextRequest("https://example.com/for/stripe?utm_source=li"));
+    expect(res.headers.get("x-middleware-rewrite")).toBe("https://example.com/?utm_source=li");
+
+    const forwardedHeaderValue = res.headers.get(`x-middleware-request-${FACET_STATE_HEADER}`);
+    const serverHeaders = new Headers();
+    if (forwardedHeaderValue) {
+      serverHeaders.set(FACET_STATE_HEADER, forwardedHeaderValue);
+    }
+    const state = readFacetState(serverHeaders);
+
+    const markup = renderToStaticMarkup(
+      <main>
+        <FacetSlot id="hero-headline" state={state} as="h1">
+          Default headline
+        </FacetSlot>
+        <FacetSlot id="account-badge" state={state} as="div">
+          Default badge
+        </FacetSlot>
+        <FacetSlot id="hero-cta" state={state} as="a" href="/demo">
+          Default CTA
+        </FacetSlot>
+        <FacetAnalytics state={state} />
+      </main>,
+    );
+
+    expect(markup).toContain("Built for Stripe&#x27;s global payments team (stripe)");
+    // {{data.name}} inside html must be HTML-escaped by @facet/core while preserving <strong>
+    expect(markup).toContain("<strong>Stripe &lt;HQ&gt;</strong> — FinTech &amp; Payments");
+    expect(markup).not.toContain("<HQ>");
+    expect(markup).toContain("Talk to your Stripe AE");
+    expect(markup).toContain('href="/demo?acct=stripe&amp;org=Stripe &lt;HQ&gt;"');
+    expect(markup).toContain('{"experienceId":"abm-dynamic","bucket":"variant"}');
+  });
 });

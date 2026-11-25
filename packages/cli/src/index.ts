@@ -10,6 +10,7 @@ export type { InitCommandOptions, InitCommandResult, StarterYamlOptions } from "
 export {
   checkCssSelector,
   collectConfigWarnings,
+  collectTemplateErrors,
   formatValidationError,
   runValidateCommand,
   validateConfigFile,
@@ -49,10 +50,20 @@ export type {
 export { applyResolvedChange, rewriteHtml } from "./preview/rewriter.js";
 export type { RewriteHtmlOptions } from "./preview/rewriter.js";
 
-export { createPreviewServer, isStaticAssetPath } from "./preview/server.js";
+export {
+  appendVaryHeader,
+  applyPreviewResponseHeaders,
+  buildUpstreamUrl,
+  createPreviewServer,
+  evaluatePreviewRequest,
+  formatStickySetCookie,
+  isStaticAssetPath,
+} from "./preview/server.js";
 export type {
+  EvaluatedPreviewRequest,
   LoadedConfigState,
   PreviewLogger,
+  PreviewResponseHeaderParams,
   PreviewServer,
   PreviewServerAddress,
   PreviewServerOptions,

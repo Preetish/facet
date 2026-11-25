@@ -2,9 +2,12 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   parseFacetYaml,
+  validateTemplateSyntax,
   type FacetConfig,
   type FacetExperience,
   type FacetValidationError,
+  type MatchCondition,
+  type MatchValue,
 } from "@facet/core";
 import { HTMLRewriter } from "html-rewriter-wasm";
 import { resolveCliIO, type CliIO } from "../io.js";
@@ -16,7 +19,10 @@ export interface ValidationWarning {
     | "full_holdout"
     | "invalid_selector"
     | "shadowed_experience"
-    | "duplicate_priority_match";
+    | "duplicate_priority_match"
+    | "missing_data_table"
+    | "unreferenced_path_param"
+    | "suspicious_origin_path";
   message: string;
   experienceId?: string;
   selector?: string;
@@ -127,8 +133,269 @@ function canonicalizeMatch(match: FacetExperience["match"]): string {
   return JSON.stringify(canonicalizeValue(match));
 }
 
-function isWildcardMatch(match: FacetExperience["match"]): boolean {
+function hasRequiredLookup(lookup: FacetExperience["lookup"]): boolean {
+  return lookup !== undefined && lookup.required !== false;
+}
+
+function canonicalizeExperienceMatch(experience: FacetExperience): string {
+  return JSON.stringify(
+    canonicalizeValue({
+      match: experience.match,
+      lookup: hasRequiredLookup(experience.lookup)
+        ? { table: experience.lookup?.table, key: experience.lookup?.key }
+        : null,
+    }),
+  );
+}
+
+function isWildcardMatch(
+  match: FacetExperience["match"],
+  lookup?: FacetExperience["lookup"],
+): boolean {
+  if (hasRequiredLookup(lookup)) {
+    return false;
+  }
   return Object.keys(match).length === 0;
+}
+
+const PARAM_SEGMENT_PATTERN = /^:([a-zA-Z_][a-zA-Z0-9_]*)$/;
+
+function extractParamsFromPathPattern(pattern: string, out: Set<string>): void {
+  for (const seg of pattern.split("/")) {
+    const match = PARAM_SEGMENT_PATTERN.exec(seg);
+    if (match?.[1] !== undefined) {
+      out.add(match[1]);
+    }
+  }
+}
+
+function extractParamsFromMatchValue(value: MatchValue, out: Set<string>): void {
+  if (typeof value === "string") {
+    extractParamsFromPathPattern(value, out);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (typeof item === "string") {
+        extractParamsFromPathPattern(item, out);
+      }
+    }
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    if (typeof value.equals === "string") {
+      extractParamsFromPathPattern(value.equals, out);
+    }
+    if (Array.isArray(value.in)) {
+      for (const item of value.in) {
+        if (typeof item === "string") {
+          extractParamsFromPathPattern(item, out);
+        }
+      }
+    }
+  }
+}
+
+function extractDeclaredPathParams(
+  condition: MatchCondition,
+  out: Set<string> = new Set(),
+): Set<string> {
+  if (condition.path !== undefined) {
+    extractParamsFromMatchValue(condition.path, out);
+  }
+  if (condition.all !== undefined) {
+    for (const sub of condition.all) {
+      extractDeclaredPathParams(sub, out);
+    }
+  }
+  if (condition.any !== undefined) {
+    for (const sub of condition.any) {
+      extractDeclaredPathParams(sub, out);
+    }
+  }
+  return out;
+}
+
+function findPipeOutsideQuotes(inner: string): number {
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (ch === undefined) break;
+    if (quote !== null) {
+      if (ch === "\\") {
+        i += 1;
+        continue;
+      }
+      if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === "|") {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function extractReferencedParamsFromTemplate(template: string, out: Set<string>): void {
+  if (!template.includes("{{")) {
+    return;
+  }
+  let i = 0;
+  while (i < template.length) {
+    if (template[i] === "{" && template[i + 1] === "{") {
+      let j = i + 2;
+      let quote: '"' | "'" | null = null;
+      let endIdx = -1;
+      while (j < template.length) {
+        const ch = template[j];
+        const nxt = template[j + 1];
+        if (quote !== null) {
+          if (ch === "\\") {
+            j += 2;
+            continue;
+          }
+          if (ch === quote) {
+            quote = null;
+          }
+          j += 1;
+          continue;
+        }
+        if (ch === '"' || ch === "'") {
+          quote = ch;
+          j += 1;
+          continue;
+        }
+        if (ch === "}" && nxt === "}") {
+          endIdx = j;
+          break;
+        }
+        j += 1;
+      }
+      if (endIdx === -1) {
+        break;
+      }
+      const inner = template.slice(i + 2, endIdx).trim();
+      const pipeIdx = findPipeOutsideQuotes(inner);
+      const varExpr = (pipeIdx === -1 ? inner : inner.slice(0, pipeIdx)).trim();
+      if (varExpr.startsWith("params.") && varExpr.length > "params.".length) {
+        out.add(varExpr.slice("params.".length));
+      }
+      i = endIdx + 2;
+      continue;
+    }
+    i += 1;
+  }
+}
+
+function safeDecodeUri(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function checkSuspiciousOriginPath(originPath: string): string | null {
+  if (!originPath.startsWith("/")) {
+    return 'does not start with "/"';
+  }
+  if (originPath.startsWith("//")) {
+    return 'starts with "//" (protocol-relative path)';
+  }
+  if (originPath.includes("://")) {
+    return 'contains "://" (full URL scheme is not allowed)';
+  }
+  if (/[\r\n]/.test(originPath)) {
+    return "contains newline characters";
+  }
+  if (originPath.includes("\\") || /%5c/i.test(originPath)) {
+    return "contains backslash characters";
+  }
+  const pathnamePart = originPath.split(/[?#]/, 1)[0] ?? "";
+  const decodedPathname = safeDecodeUri(pathnamePart);
+  if (/(^|\/)\.\.(\/|$)/.test(pathnamePart) || /(^|\/)\.\.(\/|$)/.test(decodedPathname)) {
+    return 'contains ".." path traversal segment';
+  }
+  if (originPath.includes("#")) {
+    return 'contains "#" URL fragment (fragments are not sent to origin servers)';
+  }
+  if (originPath.startsWith("/{{")) {
+    return 'starts with "/{{...}}" which may resolve to a protocol-relative path if the variable begins with "/"';
+  }
+  return null;
+}
+
+function validateTemplateField(
+  value: string,
+  fieldPath: string,
+  errors: FacetValidationError[],
+): void {
+  const result = validateTemplateSyntax(value);
+  if (!result.valid) {
+    for (const err of result.errors) {
+      errors.push({
+        path: fieldPath,
+        code: "invalid_template_syntax",
+        message: `Invalid template syntax: ${err.message} (${err.expression})`,
+      });
+    }
+  }
+}
+
+export function collectTemplateErrors(config: FacetConfig): FacetValidationError[] {
+  const errors: FacetValidationError[] = [];
+
+  for (const [slotName, slotHtml] of Object.entries(config.settings.slots)) {
+    validateTemplateField(slotHtml, `settings.slots.${slotName}`, errors);
+  }
+
+  for (let i = 0; i < config.experiences.length; i++) {
+    const exp = config.experiences[i];
+    if (!exp) continue;
+
+    if (exp.originPath !== undefined) {
+      validateTemplateField(exp.originPath, `experiences[${i}].originPath`, errors);
+    }
+
+    if (exp.lookup !== undefined) {
+      validateTemplateField(exp.lookup.key, `experiences[${i}].lookup.key`, errors);
+    }
+
+    for (let j = 0; j < exp.changes.length; j++) {
+      const change = exp.changes[j];
+      if (!change) continue;
+      const basePath = `experiences[${i}].changes[${j}]`;
+
+      if (change.text !== undefined) {
+        validateTemplateField(change.text, `${basePath}.text`, errors);
+      }
+      if (change.html !== undefined) {
+        validateTemplateField(change.html, `${basePath}.html`, errors);
+      }
+      if (change.slot !== undefined) {
+        validateTemplateField(change.slot, `${basePath}.slot`, errors);
+      }
+      if (change.prepend !== undefined) {
+        validateTemplateField(change.prepend, `${basePath}.prepend`, errors);
+      }
+      if (change.append !== undefined) {
+        validateTemplateField(change.append, `${basePath}.append`, errors);
+      }
+      if (change.attrs !== undefined) {
+        for (const [attrName, attrValue] of Object.entries(change.attrs)) {
+          if (typeof attrValue === "string") {
+            validateTemplateField(attrValue, `${basePath}.attrs.${attrName}`, errors);
+          }
+        }
+      }
+    }
+  }
+
+  return errors;
 }
 
 export function collectConfigWarnings(config: FacetConfig): ValidationWarning[] {
@@ -159,6 +426,39 @@ export function collectConfigWarnings(config: FacetConfig): ValidationWarning[] 
       });
     }
 
+    if (exp.originPath !== undefined) {
+      const suspiciousReason = checkSuspiciousOriginPath(exp.originPath);
+      if (suspiciousReason !== null) {
+        warnings.push({
+          code: "suspicious_origin_path",
+          experienceId: exp.id,
+          message: `Experience "${exp.id}" has suspicious originPath "${exp.originPath}" (${suspiciousReason}).`,
+        });
+      }
+    }
+
+    if (exp.lookup !== undefined) {
+      const hasTable =
+        config.data !== undefined &&
+        Object.prototype.hasOwnProperty.call(config.data, exp.lookup.table);
+      if (!hasTable) {
+        warnings.push({
+          code: "missing_data_table",
+          experienceId: exp.id,
+          message: `Experience "${exp.id}" lookup references table "${exp.lookup.table}", which is not defined in top-level "data".`,
+        });
+      }
+    }
+
+    const declaredParams = extractDeclaredPathParams(exp.match);
+    const referencedParams = new Set<string>();
+    if (exp.originPath !== undefined) {
+      extractReferencedParamsFromTemplate(exp.originPath, referencedParams);
+    }
+    if (exp.lookup !== undefined) {
+      extractReferencedParamsFromTemplate(exp.lookup.key, referencedParams);
+    }
+
     for (const change of exp.changes) {
       const check = checkCssSelector(change.selector);
       if (!check.valid) {
@@ -169,6 +469,48 @@ export function collectConfigWarnings(config: FacetConfig): ValidationWarning[] 
           message: `Experience "${exp.id}" has an invalid or unsupported CSS selector "${change.selector}"${check.reason ? ` (${check.reason})` : ""}.`,
         });
       }
+
+      if (change.text !== undefined) {
+        extractReferencedParamsFromTemplate(change.text, referencedParams);
+      }
+      if (change.html !== undefined) {
+        extractReferencedParamsFromTemplate(change.html, referencedParams);
+      }
+      if (change.slot !== undefined) {
+        extractReferencedParamsFromTemplate(change.slot, referencedParams);
+        if (
+          !change.slot.includes("{{") &&
+          Object.prototype.hasOwnProperty.call(config.settings.slots, change.slot)
+        ) {
+          const slotBody = config.settings.slots[change.slot];
+          if (slotBody !== undefined) {
+            extractReferencedParamsFromTemplate(slotBody, referencedParams);
+          }
+        }
+      }
+      if (change.prepend !== undefined) {
+        extractReferencedParamsFromTemplate(change.prepend, referencedParams);
+      }
+      if (change.append !== undefined) {
+        extractReferencedParamsFromTemplate(change.append, referencedParams);
+      }
+      if (change.attrs !== undefined) {
+        for (const attrValue of Object.values(change.attrs)) {
+          if (typeof attrValue === "string") {
+            extractReferencedParamsFromTemplate(attrValue, referencedParams);
+          }
+        }
+      }
+    }
+
+    for (const paramName of referencedParams) {
+      if (!declaredParams.has(paramName)) {
+        warnings.push({
+          code: "unreferenced_path_param",
+          experienceId: exp.id,
+          message: `Experience "${exp.id}" references "{{params.${paramName}}}", but no ":${paramName}" parameter is declared in its path matcher.`,
+        });
+      }
     }
   }
 
@@ -176,8 +518,10 @@ export function collectConfigWarnings(config: FacetConfig): ValidationWarning[] 
     .map((experience, index) => ({
       experience,
       index,
-      canonicalMatch: canonicalizeMatch(experience.match),
-      wildcard: isWildcardMatch(experience.match),
+      canonicalMatchOnly: canonicalizeMatch(experience.match),
+      canonicalEffectiveMatch: canonicalizeExperienceMatch(experience),
+      hasRequiredLookup: hasRequiredLookup(experience.lookup),
+      wildcard: isWildcardMatch(experience.match, experience.lookup),
     }))
     .filter(({ experience }) => experience.enabled)
     .sort((a, b) => {
@@ -195,10 +539,16 @@ export function collectConfigWarnings(config: FacetConfig): ValidationWarning[] 
       const earlier = enabledOrdered[j];
       if (!earlier) continue;
 
-      const sameMatch = earlier.canonicalMatch === current.canonicalMatch;
+      const sameEffectiveMatch =
+        earlier.canonicalEffectiveMatch === current.canonicalEffectiveMatch;
+      const earlierSubsumesMatch =
+        earlier.canonicalMatchOnly === current.canonicalMatchOnly && !earlier.hasRequiredLookup;
       const samePriority = earlier.experience.priority === current.experience.priority;
 
-      if (earlier.experience.stopOnMatch && (earlier.wildcard || sameMatch)) {
+      if (
+        earlier.experience.stopOnMatch &&
+        (earlier.wildcard || sameEffectiveMatch || earlierSubsumesMatch)
+      ) {
         const reason = earlier.wildcard
           ? `matches all requests`
           : samePriority
@@ -212,7 +562,7 @@ export function collectConfigWarnings(config: FacetConfig): ValidationWarning[] 
         break;
       }
 
-      if (samePriority && sameMatch) {
+      if (samePriority && sameEffectiveMatch) {
         warnings.push({
           code: "duplicate_priority_match",
           experienceId: current.experience.id,
@@ -262,6 +612,18 @@ export async function validateConfigFile(configPath: string): Promise<ValidateRe
       exitCode: 1,
       configPath,
       errors: parsed.errors,
+      warnings: [],
+    };
+  }
+
+  const templateErrors = collectTemplateErrors(parsed.config);
+  if (templateErrors.length > 0) {
+    return {
+      ok: false,
+      exitCode: 1,
+      configPath,
+      config: parsed.config,
+      errors: templateErrors,
       warnings: [],
     };
   }

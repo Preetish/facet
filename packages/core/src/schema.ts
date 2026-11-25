@@ -4,6 +4,7 @@ export const ANALYTICS_PROVIDERS = ["ga4", "umami", "posthog", "custom"] as cons
 export type AnalyticsProvider = (typeof ANALYTICS_PROVIDERS)[number];
 
 export const DEFAULT_COOKIE_NAME = "__facet_vid";
+export const DEFAULT_STICKY_COOKIE_NAME = "__facet_sticky";
 export const DEFAULT_PREVIEW_PARAM = "__facet_preview";
 export const DEFAULT_PREVIEW_SIG_PARAM = "__facet_sig";
 export const DEFAULT_PREVIEW_BUCKET_PARAM = "__facet_bucket";
@@ -94,6 +95,7 @@ export type AnalyticsSettings = z.infer<typeof analyticsSettingsSchema>;
 export const settingsSchema = z
   .object({
     cookieName: z.string().trim().min(1).default(DEFAULT_COOKIE_NAME),
+    stickyCookieName: z.string().trim().min(1).default(DEFAULT_STICKY_COOKIE_NAME),
     previewParam: z.string().trim().min(1).default(DEFAULT_PREVIEW_PARAM),
     previewSigParam: z.string().trim().min(1).default(DEFAULT_PREVIEW_SIG_PARAM),
     analytics: analyticsSettingsSchema.default({ providers: [] }),
@@ -285,6 +287,48 @@ export const changeSchema = z
 
 export type FacetChange = z.infer<typeof changeSchema>;
 
+export type StickyDuration = boolean | "session" | `${number}m` | `${number}h` | `${number}d`;
+
+const STICKY_DURATION_PATTERN = /^[1-9]\d*[mhd]$/;
+
+export const stickyDurationSchema: z.ZodType<StickyDuration> = z.union([
+  z.boolean(),
+  z.literal("session"),
+  z
+    .string()
+    .regex(
+      STICKY_DURATION_PATTERN,
+      'Sticky duration must be a boolean, "session", or a positive duration like "30m", "24h", or "7d"',
+    ) as z.ZodType<`${number}m` | `${number}h` | `${number}d`>,
+]);
+
+export const experienceLookupSchema = z
+  .object({
+    table: z.string().trim().min(1, "Lookup table name is required"),
+    key: z.string().trim().min(1, "Lookup key expression is required"),
+    required: z.boolean().default(true),
+  })
+  .strict();
+
+export type ExperienceLookup = z.infer<typeof experienceLookupSchema>;
+
+export type FacetDataRow = Record<string, MatchScalar>;
+export type FacetDataTable = Record<string, FacetDataRow>;
+export type FacetDataTables = Record<string, FacetDataTable>;
+
+export const dataRecordSchema: z.ZodType<FacetDataRow> = z.record(
+  z.string().min(1),
+  matchScalarSchema,
+);
+export const dataTableSchema: z.ZodType<FacetDataTable> = z.record(
+  z.string().min(1),
+  dataRecordSchema,
+);
+export const dataTablesSchema: z.ZodType<FacetDataTables> = z.record(
+  z.string().min(1),
+  dataTableSchema,
+);
+
 export const experienceSchema = z
   .object({
     id: z
@@ -304,6 +348,31 @@ export const experienceSchema = z
       .min(0, "Holdout must be between 0 and 1")
       .max(1, "Holdout must be between 0 and 1")
       .default(0),
+    originPath: z
+      .string()
+      .trim()
+      .min(1, "originPath must be a non-empty path starting with '/'")
+      .refine((p) => p.startsWith("/"), {
+        message: 'originPath must start with "/"',
+      })
+      .refine(
+        (p) => {
+          const pathnamePart = p.split(/[?#]/, 1)[0] ?? "";
+          return (
+            !p.startsWith("//") &&
+            !p.includes("\\") &&
+            !/[\r\n]/.test(p) &&
+            !/(^|\/)\.\.(\/|$)/.test(pathnamePart)
+          );
+        },
+        {
+          message:
+            'originPath must be a safe relative origin path (cannot start with "//", contain backslashes, newlines, or ".." traversal segments)',
+        },
+      )
+      .optional(),
+    lookup: experienceLookupSchema.optional(),
+    sticky: stickyDurationSchema.optional(),
     match: matchConditionSchema,
     changes: z.array(changeSchema).min(1, "Experience must specify at least one change"),
   })
@@ -315,6 +384,7 @@ export const facetConfigSchema = z
   .object({
     version: z.literal(1),
     settings: settingsSchema.default({}),
+    data: dataTablesSchema.optional(),
     experiences: z.array(experienceSchema).default([]),
   })
   .strict()

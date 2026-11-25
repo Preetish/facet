@@ -1,4 +1,4 @@
-# Facet v1 configuration for the Meridian Cloud example site.
+# Facet configuration for the Meridian Cloud example site (v0.2 features).
 # Validate locally:  npx facet validate examples/basic-site/facet.yaml
 # Preview locally:   npx facet preview --target http://127.0.0.1:4000 --config examples/basic-site/facet.yaml
 
@@ -7,6 +7,8 @@ version: 1
 settings:
   # First-party cookie storing the visitor's sticky deterministic bucketing ID
   cookieName: "__facet_vid"
+  # First-party cookie storing session-sticky matches and attribution signals
+  stickyCookieName: "__facet_sticky"
   # Query parameters used for HMAC-signed shareable production preview links
   previewParam: "__facet_preview"
   previewSigParam: "__facet_sig"
@@ -39,39 +41,99 @@ settings:
     eu-compliance-badge: >-
       <span>EU Data Residency &middot; Frankfurt &amp; Dublin Regions</span>
 
+# Inline data lookup tables for scalable 1:1 ABM experiences (also loadable via parseCsvTable)
+data:
+  accounts:
+    stripe:
+      name: "Stripe"
+      team: "infrastructure"
+      headline: "Zero-latency edge routing built for Stripe's global scale"
+      subhead: "See how Meridian pairs with global payment rails to cut p99 checkout latency by 38% with deterministic failover."
+      cta: "Open Stripe's architecture walkthrough"
+      logoSlot: "stripe-logos"
+    plaid:
+      name: "Plaid"
+      team: "platform"
+      headline: "Resilient API edge infrastructure built for Plaid"
+      subhead: "Keep high-throughput financial data connections fast and compliant across 300+ global PoPs."
+      cta: "Explore Plaid's edge benchmark"
+      logoSlot: "fintech-logos"
+    ramp:
+      name: "Ramp"
+      team: "engineering"
+      headline: "Predictable global routing for Ramp's finance platform"
+      subhead: "Ship real-time card authorization and spend-control workloads with sub-20ms edge failover."
+      cta: "Book Ramp's live walkthrough"
+      logoSlot: "fintech-logos"
+
 experiences:
-  # 1. 1:1 ABM Link / Account Page (100% match rate, zero paid enrichment keys)
-  # Test: http://127.0.0.1:8787/?acct=stripe
-  - id: stripe-abm
-    name: "Stripe 1:1 ABM Landing Experience"
+  # 1. Virtual 1:1 ABM Account Page (`/for/:acct` -> fetches `/` from origin, sticky for 7 days)
+  # Test: http://127.0.0.1:8787/for/stripe  or  http://127.0.0.1:8787/for/plaid
+  - id: abm-account-page
+    name: "1:1 ABM Virtual Account Page"
     priority: 100
     stopOnMatch: true
     holdout: 0
+    originPath: "/"
+    sticky: "7d"
     match:
-      any:
-        - query.acct: ["stripe"]
-        - path: "/for/stripe"
+      path: "/for/:acct"
+    lookup:
+      table: "accounts"
+      key: "{{params.acct}}"
+      required: true
     changes:
       - selector: "[data-facet-slot='hero-eyebrow']"
-        text: "Prepared for the Stripe infrastructure team"
+        text: 'Prepared for the {{data.name}} {{data.team | default("engineering")}} team'
       - selector: "h1"
-        text: "Zero-latency edge routing built for Stripe's global scale"
+        text: '{{data.headline | default("Edge infrastructure built for your team")}}'
       - selector: "[data-facet-slot='hero-subhead']"
-        text: "See how Meridian pairs with global payment rails to cut p99 checkout latency by 38% with deterministic failover."
+        text: '{{data.subhead | default("Deploy APIs and edge routing in 300+ cities with deterministic failover.")}}'
       - selector: "[data-cta='hero']"
-        text: "Open Stripe's architecture walkthrough"
+        text: '{{data.cta | default("Book a tailored demo")}}'
         attrs:
-          href: "/demo?acct=stripe"
+          href: "/demo?acct={{params.acct}}"
       - selector: "#logo-strip"
-        slot: "stripe-logos"
+        slot: '{{data.logoSlot | default("fintech-logos")}}'
 
-  # 2. Paid Ad Message-Match + Optional BYOK Company Industry Rule
+  # 2. 1:1 ABM Query Link (`/?acct=stripe`, sticky for 7 days across subsequent navigation)
+  # Test: http://127.0.0.1:8787/?acct=stripe  or  http://127.0.0.1:8787/?acct=ramp
+  - id: abm-query-account
+    name: "1:1 ABM Query Account Experience"
+    priority: 90
+    stopOnMatch: true
+    holdout: 0
+    sticky: "7d"
+    match:
+      path: "/"
+      query.acct:
+        exists: true
+    lookup:
+      table: "accounts"
+      key: "{{query.acct}}"
+      required: true
+    changes:
+      - selector: "[data-facet-slot='hero-eyebrow']"
+        text: 'Prepared for the {{data.name}} {{data.team | default("engineering")}} team'
+      - selector: "h1"
+        text: '{{data.headline | default("Edge infrastructure built for your team")}}'
+      - selector: "[data-facet-slot='hero-subhead']"
+        text: '{{data.subhead | default("Deploy APIs and edge routing in 300+ cities with deterministic failover.")}}'
+      - selector: "[data-cta='hero']"
+        text: '{{data.cta | default("Book a tailored demo")}}'
+        attrs:
+          href: "/demo?acct={{query.acct}}"
+      - selector: "#logo-strip"
+        slot: '{{data.logoSlot | default("fintech-logos")}}'
+
+  # 3. Paid Ad Message-Match + Optional BYOK Company Industry Rule (sticky for 7 days)
   # Test: http://127.0.0.1:8787/?utm_campaign=fintech-q4
   - id: fintech-abm
     name: "Fintech Paid Search & ABM"
     priority: 50
     stopOnMatch: true
     holdout: 0.2 # Deterministic 20% sticky control group to measure real conversion lift
+    sticky: "7d"
     match:
       path: "/"
       any:
@@ -93,7 +155,7 @@ experiences:
       - selector: "#logo-strip"
         slot: "fintech-logos"
 
-  # 3. Geo + Returning-Visitor Rule (built-in edge signals, zero API keys)
+  # 4. Geo + Returning-Visitor Rule (built-in edge signals, zero API keys)
   # Test in Preview Bar by selecting "eu-returning-visitor"
   - id: eu-returning-visitor
     name: "EU Returning Visitor Message"

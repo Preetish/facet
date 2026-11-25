@@ -5,6 +5,7 @@ import {
   DEFAULT_ENRICHMENT_TIMEOUT_MS,
   DEFAULT_PREVIEW_PARAM,
   DEFAULT_PREVIEW_SIG_PARAM,
+  DEFAULT_STICKY_COOKIE_NAME,
 } from "./schema.js";
 
 export type JsonSchemaObject = Record<string, unknown>;
@@ -26,6 +27,9 @@ export function exportFacetJsonSchema(): JsonSchemaObject {
       settings: {
         $ref: "#/$defs/Settings",
       },
+      data: {
+        $ref: "#/$defs/DataTables",
+      },
       experiences: {
         type: "array",
         description:
@@ -46,6 +50,13 @@ export function exportFacetJsonSchema(): JsonSchemaObject {
             minLength: 1,
             default: DEFAULT_COOKIE_NAME,
             description: "First-party cookie name used for sticky visitor bucketing.",
+          },
+          stickyCookieName: {
+            type: "string",
+            minLength: 1,
+            default: DEFAULT_STICKY_COOKIE_NAME,
+            description:
+              "First-party cookie name used for session-sticky experience matches and attribution signals.",
           },
           previewParam: {
             type: "string",
@@ -241,6 +252,69 @@ export function exportFacetJsonSchema(): JsonSchemaObject {
           },
         },
       },
+      DataRow: {
+        type: "object",
+        additionalProperties: {
+          $ref: "#/$defs/MatchScalar",
+        },
+        description: "Key-value record for a single row in a data lookup table.",
+      },
+      DataTable: {
+        type: "object",
+        additionalProperties: {
+          $ref: "#/$defs/DataRow",
+        },
+        description: "Keyed lookup table of rows (e.g. accounts keyed by slug).",
+      },
+      DataTables: {
+        type: "object",
+        additionalProperties: {
+          $ref: "#/$defs/DataTable",
+        },
+        description: "Inline keyed data lookup tables referenced by experience.lookup.",
+      },
+      ExperienceLookup: {
+        type: "object",
+        additionalProperties: false,
+        required: ["table", "key"],
+        properties: {
+          table: {
+            type: "string",
+            minLength: 1,
+            description: "Name of the lookup table in top-level data.",
+          },
+          key: {
+            type: "string",
+            minLength: 1,
+            description:
+              "Key expression (supports template placeholders such as '{{params.acct}}' or '{{query.acct}}').",
+          },
+          required: {
+            type: "boolean",
+            default: true,
+            description:
+              "When true (default), the experience does not match if the key is empty or missing from the lookup table.",
+          },
+        },
+      },
+      StickyDuration: {
+        oneOf: [
+          {
+            type: "boolean",
+            description:
+              "true enables session-scoped sticky matching; false disables sticky matching.",
+          },
+          {
+            const: "session",
+            description: "Session-scoped sticky matching (browser session cookie).",
+          },
+          {
+            type: "string",
+            pattern: "^[1-9]\\d*[mhd]$",
+            description: 'Positive duration such as "30m", "24h", or "7d".',
+          },
+        ],
+      },
       Experience: {
         type: "object",
         additionalProperties: false,
@@ -278,6 +352,19 @@ export function exportFacetJsonSchema(): JsonSchemaObject {
             default: 0,
             description:
               "Fraction of matched visitors deterministically held back as control (0..1).",
+          },
+          originPath: {
+            type: "string",
+            minLength: 1,
+            pattern: "^/([^/\\\\\\r\\n][^\\r\\n]*)?$",
+            description:
+              "Optional origin path to fetch instead of the request path (for virtual ABM URLs such as /for/:acct). Supports template interpolation.",
+          },
+          lookup: {
+            $ref: "#/$defs/ExperienceLookup",
+          },
+          sticky: {
+            $ref: "#/$defs/StickyDuration",
           },
           match: {
             $ref: "#/$defs/MatchCondition",

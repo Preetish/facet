@@ -3,6 +3,28 @@
   "version": "0.1.0",
   "description": "Pure zero-I/O edge website personalization and ad message-match engine for Facet",
   "license": "Apache-2.0",
+  "homepage": "https://github.com/Preetish/facet#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Preetish/facet.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/Preetish/facet/issues"
+  },
+  "keywords": [
+    "facet",
+    "personalization",
+    "edge",
+    "abm",
+    "message-match",
+    "experimentation",
+    "cloudflare-workers",
+    "nextjs"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

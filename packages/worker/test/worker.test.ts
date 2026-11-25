@@ -237,14 +237,14 @@ experiences:
     expect(await cssRes.text()).toBe("body{color:red}");
     expect(cssRes.headers.get("cache-control")).toBe("public, max-age=86400");
     expect(cssRes.headers.get("set-cookie")).toBeNull();
+    // Static asset paths bypass before config loading or enrichment
+    expect(configLoader).not.toHaveBeenCalled();
+    expect(enrichMock.enrich).not.toHaveBeenCalled();
 
     const jsonRes = await worker.fetch(new Request("https://site.example.com/api/data"));
     expect(await jsonRes.text()).toBe('{"ok":true}');
     expect(jsonRes.headers.get("cache-control")).toBe("public, max-age=60");
     expect(jsonRes.headers.get("set-cookie")).toBeNull();
-
-    expect(configLoader).not.toHaveBeenCalled();
-    expect(enrichMock.enrich).not.toHaveBeenCalled();
   });
 
   it("supports application/xhtml+xml responses", async () => {

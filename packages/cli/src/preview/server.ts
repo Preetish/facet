@@ -12,12 +12,15 @@ import {
   parseFacetYaml,
   toAnalyticsExposures,
   type EvaluateOptions,
+  type EvaluationResult,
   type FacetConfig,
+  type StickyCookieDirective,
 } from "@facet/core";
 import {
   LOCAL_MODE_COOKIE_NAME,
   buildPreviewBarHtml,
   resolveLocalPreviewMode,
+  type ResolvedLocalPreviewMode,
 } from "./preview-bar.js";
 import { rewriteHtml } from "./rewriter.js";
 
@@ -33,6 +36,7 @@ export interface PreviewServerOptions {
   port?: number;
   host?: string;
   injectPreviewBar?: boolean;
+  now?: () => number;
   logger?: Partial<PreviewLogger>;
 }
 
@@ -232,6 +236,171 @@ function appendSetCookie(headers: http.OutgoingHttpHeaders, cookie: string): voi
   }
 }
 
+function safeDecodeUri(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+export function buildUpstreamUrl(targetUrl: URL, incomingUrl: URL, originPath: string | null): URL {
+  const fallback = new URL(`${incomingUrl.pathname}${incomingUrl.search}`, targetUrl.origin);
+  if (originPath === null || originPath.length === 0) {
+    return fallback;
+  }
+  if (
+    !originPath.startsWith("/") ||
+    originPath.startsWith("//") ||
+    originPath.includes("\\") ||
+    /[\r\n]/.test(originPath)
+  ) {
+    return fallback;
+  }
+  const pathnamePart = originPath.split(/[?#]/, 1)[0] ?? "";
+  if (/(^|\/)\.\.(\/|$)/.test(pathnamePart)) {
+    return fallback;
+  }
+  const decodedPathname = safeDecodeUri(pathnamePart);
+  if (decodedPathname.includes("\\") || /(^|\/)\.\.(\/|$)/.test(decodedPathname)) {
+    return fallback;
+  }
+  try {
+    const rewritten = new URL(originPath, targetUrl.origin);
+    if (rewritten.origin !== targetUrl.origin) {
+      return fallback;
+    }
+    rewritten.hash = "";
+    if (rewritten.search.length === 0) {
+      rewritten.search = incomingUrl.search;
+    } else if (incomingUrl.search.length > 0) {
+      for (const [key, value] of incomingUrl.searchParams.entries()) {
+        if (!rewritten.searchParams.has(key)) {
+          rewritten.searchParams.append(key, value);
+        }
+      }
+    }
+    return rewritten;
+  } catch {
+    return fallback;
+  }
+}
+
+export function formatStickySetCookie(stickyCookie: StickyCookieDirective): string {
+  const parts = [
+    `${encodeURIComponent(stickyCookie.name)}=${encodeURIComponent(stickyCookie.value)}`,
+    "Path=/",
+    "SameSite=Lax",
+    "HttpOnly",
+  ];
+  if (stickyCookie.maxAgeSeconds !== null) {
+    parts.push(`Max-Age=${Math.max(0, Math.floor(stickyCookie.maxAgeSeconds))}`);
+  }
+  return parts.join("; ");
+}
+
+export function appendVaryHeader(headers: http.OutgoingHttpHeaders, token: string): void {
+  const existingKey = Object.keys(headers).find((k) => k.toLowerCase() === "vary");
+  const existing = existingKey !== undefined ? headers[existingKey] : undefined;
+  const rawValues: string[] = [];
+  if (Array.isArray(existing)) {
+    for (const item of existing) {
+      rawValues.push(...String(item).split(","));
+    }
+  } else if (existing !== undefined) {
+    rawValues.push(...String(existing).split(","));
+  }
+
+  const normalized = rawValues.map((v) => v.trim()).filter((v) => v.length > 0);
+  if (normalized.some((v) => v === "*" || v.toLowerCase() === token.toLowerCase())) {
+    return;
+  }
+
+  normalized.push(token);
+  const headerKey = existingKey ?? "vary";
+  headers[headerKey] = normalized.join(", ");
+}
+
+export interface PreviewResponseHeaderParams {
+  config: FacetConfig;
+  evaluation: EvaluationResult;
+  resolvedMode: ResolvedLocalPreviewMode;
+  bodyByteLength: number;
+}
+
+export function applyPreviewResponseHeaders(
+  outHeaders: http.OutgoingHttpHeaders,
+  params: PreviewResponseHeaderParams,
+): void {
+  const { config, evaluation, resolvedMode, bodyByteLength } = params;
+
+  outHeaders["content-length"] = String(bodyByteLength);
+  outHeaders["cache-control"] = evaluation.cacheControl ?? PERSONALIZED_CACHE_CONTROL;
+  appendVaryHeader(outHeaders, "Cookie");
+  outHeaders["x-facet-status"] = evaluation.personalized
+    ? "personalized"
+    : evaluation.matched.length > 0
+      ? "control"
+      : "default";
+
+  if (evaluation.isNewVisitor) {
+    appendSetCookie(
+      outHeaders,
+      `${encodeURIComponent(config.settings.cookieName)}=${encodeURIComponent(evaluation.visitorId)}; Path=/; SameSite=Lax; Max-Age=31536000`,
+    );
+  }
+
+  if (evaluation.stickyCookie !== null && !evaluation.previewMode) {
+    appendSetCookie(outHeaders, formatStickySetCookie(evaluation.stickyCookie));
+  }
+
+  if (resolvedMode.setCookieValue !== undefined) {
+    appendSetCookie(
+      outHeaders,
+      `${LOCAL_MODE_COOKIE_NAME}=${encodeURIComponent(resolvedMode.setCookieValue)}; Path=/; SameSite=Lax`,
+    );
+  }
+}
+
+export interface EvaluatedPreviewRequest {
+  evaluation: EvaluationResult;
+  resolvedMode: ResolvedLocalPreviewMode;
+}
+
+export function evaluatePreviewRequest(
+  config: FacetConfig,
+  incomingUrl: URL,
+  method: string,
+  nodeHeaders: http.IncomingHttpHeaders,
+  now?: () => number,
+): EvaluatedPreviewRequest {
+  const webRequest = new Request(incomingUrl.toString(), {
+    method,
+    headers: buildWebHeaders(nodeHeaders),
+  });
+  const context = buildContextFromRequest(webRequest, {
+    cookieName: config.settings.cookieName,
+  });
+
+  const resolvedMode = resolveLocalPreviewMode(incomingUrl, context.cookies, {
+    previewParam: config.settings.previewParam,
+  });
+
+  const evalOptions: EvaluateOptions = {};
+  if (now !== undefined) {
+    evalOptions.now = now();
+  }
+  if (resolvedMode.mode.kind === "default") {
+    evalOptions.previewBucket = "default";
+  } else if (resolvedMode.mode.kind === "experience") {
+    evalOptions.previewExperienceId = resolvedMode.mode.experienceId;
+    evalOptions.previewBucket = resolvedMode.mode.bucket;
+  }
+
+  const evaluation = evaluate(config, context, evalOptions);
+  return { evaluation, resolvedMode };
+}
+
 function readStreamToBuffer(stream: IncomingMessage): Promise<Buffer> {
   return new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -291,6 +460,7 @@ export function createPreviewServer(options: PreviewServerOptions): PreviewServe
   const requestedPort = options.port ?? 8787;
   const configPath = path.resolve(options.configPath);
   const injectPreviewBar = options.injectPreviewBar ?? true;
+  const nowFn = options.now;
   const logger: PreviewLogger = {
     info: options.logger?.info ?? DEFAULT_LOGGER.info,
     warn: options.logger?.warn ?? DEFAULT_LOGGER.warn,
@@ -389,9 +559,44 @@ export function createPreviewServer(options: PreviewServerOptions): PreviewServe
     const rawUrl = req.url ?? "/";
     const proxyOrigin = getProxyOrigin(req);
     const incomingUrl = new URL(rawUrl, proxyOrigin);
-    const upstreamUrl = new URL(rawUrl, targetUrl.origin);
     const staticAsset = isStaticAssetPath(incomingUrl.pathname);
     const mayRewrite = method === "GET" && !staticAsset;
+
+    let upstreamUrl = buildUpstreamUrl(targetUrl, incomingUrl, null);
+    let currentConfigState: LoadedConfigState | null = null;
+    let preEvaluated: {
+      config: FacetConfig;
+      evaluation: EvaluationResult;
+      resolvedMode: ResolvedLocalPreviewMode;
+    } | null = null;
+    let preEvalFailed = false;
+
+    if (mayRewrite) {
+      currentConfigState = await ensureFreshConfig();
+      if (currentConfigState.ok) {
+        try {
+          const { evaluation, resolvedMode } = evaluatePreviewRequest(
+            currentConfigState.config,
+            incomingUrl,
+            method,
+            req.headers,
+            nowFn,
+          );
+          preEvaluated = {
+            config: currentConfigState.config,
+            evaluation,
+            resolvedMode,
+          };
+          upstreamUrl = buildUpstreamUrl(targetUrl, incomingUrl, evaluation.originPath);
+        } catch (err) {
+          preEvalFailed = true;
+          const message = err instanceof Error ? err.message : String(err);
+          logger.warn(
+            `[facet] Warning: error evaluating Facet config for ${incomingUrl.pathname} (passing through untouched): ${message}`,
+          );
+        }
+      }
+    }
 
     const upstreamHeaders = buildUpstreamRequestHeaders(req, targetUrl, mayRewrite);
 
@@ -417,7 +622,8 @@ export function createPreviewServer(options: PreviewServerOptions): PreviewServe
         ? upstreamRes.headers["content-type"]
         : undefined;
     const isRedirect = statusCode >= 300 && statusCode < 400;
-    const isNoBodyStatus = statusCode < 200 || statusCode === 204 || statusCode === 304;
+    const isNoBodyStatus =
+      statusCode < 200 || statusCode === 204 || statusCode === 205 || statusCode === 304;
     const shouldRewriteHtml =
       mayRewrite && !isRedirect && !isNoBodyStatus && isHtmlContentType(contentType);
 
@@ -444,8 +650,7 @@ export function createPreviewServer(options: PreviewServerOptions): PreviewServe
       return;
     }
 
-    const currentConfigState = await ensureFreshConfig();
-    if (!currentConfigState.ok) {
+    if (!currentConfigState?.ok || preEvalFailed || preEvaluated === null) {
       // Fail-open: return untouched origin HTML immediately.
       const failOpenHeaders = copyUpstreamHeaders(
         upstreamRes.headers,
@@ -461,31 +666,9 @@ export function createPreviewServer(options: PreviewServerOptions): PreviewServe
       return;
     }
 
-    const config = currentConfigState.config;
+    const { config, evaluation, resolvedMode } = preEvaluated;
 
     try {
-      const webRequest = new Request(incomingUrl.toString(), {
-        method,
-        headers: buildWebHeaders(req.headers),
-      });
-      const context = buildContextFromRequest(webRequest, {
-        cookieName: config.settings.cookieName,
-      });
-
-      const resolvedMode = resolveLocalPreviewMode(incomingUrl, context.cookies, {
-        previewParam: config.settings.previewParam,
-      });
-
-      const evalOptions: EvaluateOptions = {};
-      if (resolvedMode.mode.kind === "default") {
-        evalOptions.previewBucket = "default";
-      } else if (resolvedMode.mode.kind === "experience") {
-        evalOptions.previewExperienceId = resolvedMode.mode.experienceId;
-        evalOptions.previewBucket = resolvedMode.mode.bucket;
-      }
-
-      const evaluation = evaluate(config, context, evalOptions);
-
       const analyticsSnippet =
         evaluation.matched.length > 0 && config.settings.analytics.providers.length > 0
           ? buildAnalyticsSnippet(
@@ -510,32 +693,17 @@ export function createPreviewServer(options: PreviewServerOptions): PreviewServe
       });
 
       const outHeaders = copyUpstreamHeaders(upstreamRes.headers, targetUrl, proxyOrigin, true);
-      outHeaders["content-length"] = String(rewrittenBody.byteLength);
-      outHeaders["cache-control"] = evaluation.cacheControl ?? PERSONALIZED_CACHE_CONTROL;
-      outHeaders["x-facet-status"] = evaluation.personalized
-        ? "personalized"
-        : evaluation.matched.length > 0
-          ? "control"
-          : "default";
-
-      if (evaluation.isNewVisitor) {
-        appendSetCookie(
-          outHeaders,
-          `${encodeURIComponent(config.settings.cookieName)}=${encodeURIComponent(evaluation.visitorId)}; Path=/; SameSite=Lax; Max-Age=31536000`,
-        );
-      }
-
-      if (resolvedMode.setCookieValue !== undefined) {
-        appendSetCookie(
-          outHeaders,
-          `${LOCAL_MODE_COOKIE_NAME}=${encodeURIComponent(resolvedMode.setCookieValue)}; Path=/; SameSite=Lax`,
-        );
-      }
+      applyPreviewResponseHeaders(outHeaders, {
+        config,
+        evaluation,
+        resolvedMode,
+        bodyByteLength: rewrittenBody.byteLength,
+      });
 
       res.writeHead(statusCode, outHeaders);
       res.end(rewrittenBody);
     } catch (err) {
-      // Fail-open on any unexpected rewrite/evaluation error.
+      // Fail-open on any unexpected rewrite error.
       const message = err instanceof Error ? err.message : String(err);
       logger.warn(
         `[facet] Warning: error rewriting HTML for ${incomingUrl.pathname} (passing through untouched): ${message}`,

@@ -6,6 +6,7 @@ import {
   DEFAULT_ENRICHMENT_TIMEOUT_MS,
   DEFAULT_PREVIEW_PARAM,
   DEFAULT_PREVIEW_SIG_PARAM,
+  DEFAULT_STICKY_COOKIE_NAME,
   exportFacetJsonSchema,
   parseFacetYaml,
   validateFacetConfig,
@@ -129,6 +130,7 @@ experiences:
 
     expect(result.config.settings).toEqual({
       cookieName: DEFAULT_COOKIE_NAME,
+      stickyCookieName: DEFAULT_STICKY_COOKIE_NAME,
       previewParam: DEFAULT_PREVIEW_PARAM,
       previewSigParam: DEFAULT_PREVIEW_SIG_PARAM,
       analytics: { providers: [] },
@@ -423,11 +425,109 @@ experiences:
 
     const settings = defs["Settings"];
     const settingsProps = settings?.["properties"] as Record<string, Record<string, unknown>>;
+    expect(settingsProps["stickyCookieName"]?.["default"]).toBe(DEFAULT_STICKY_COOKIE_NAME);
     const analyticsProps = settingsProps["analytics"]?.["properties"] as Record<
       string,
       Record<string, unknown>
     >;
     const providerItems = analyticsProps["providers"]?.["items"] as Record<string, unknown>;
     expect(providerItems["enum"]).toEqual([...ANALYTICS_PROVIDERS]);
+
+    const expProps = defs["Experience"]?.["properties"] as Record<string, unknown>;
+    expect(expProps["originPath"]).toBeDefined();
+    expect(expProps["lookup"]).toBeDefined();
+    expect(expProps["sticky"]).toBeDefined();
+    expect(defs["DataTables"]).toBeDefined();
+    expect(defs["ExperienceLookup"]).toBeDefined();
+    expect(defs["StickyDuration"]).toBeDefined();
+  });
+
+  it("validates v0.2 schema fields (originPath, data, lookup, sticky, stickyCookieName)", () => {
+    const valid = parseFacetYaml(`
+version: 1
+settings:
+  stickyCookieName: "__my_sticky"
+data:
+  accounts:
+    stripe:
+      name: "Stripe"
+      employees: 8000
+      enterprise: true
+experiences:
+  - id: abm-for
+    name: "ABM Virtual Page"
+    originPath: "/"
+    sticky: "7d"
+    lookup:
+      table: accounts
+      key: "{{params.acct}}"
+    match:
+      path: "/for/:acct"
+    changes:
+      - selector: "h1"
+        text: "Welcome {{data.name}}"
+  - id: session-sticky
+    name: "Session Sticky"
+    sticky: true
+    match:
+      utm_campaign: "q4"
+    changes:
+      - selector: "h1"
+        text: "Q4"
+`);
+    expect(valid.ok).toBe(true);
+    if (!valid.ok) return;
+    expect(valid.config.settings.stickyCookieName).toBe("__my_sticky");
+    expect(valid.config.data?.["accounts"]?.["stripe"]?.["employees"]).toBe(8000);
+    expect(valid.config.experiences[0]?.originPath).toBe("/");
+    expect(valid.config.experiences[0]?.lookup).toEqual({
+      table: "accounts",
+      key: "{{params.acct}}",
+      required: true,
+    });
+    expect(valid.config.experiences[0]?.sticky).toBe("7d");
+    expect(valid.config.experiences[1]?.sticky).toBe(true);
+
+    // Rejects invalid originPath (missing leading /, protocol-relative //, backslashes, traversal ..)
+    for (const badOriginPath of [
+      "enterprise",
+      "//evil.com",
+      "/\\evil",
+      "/a\\b",
+      "/a\nb",
+      "/templates/../admin",
+      "/..",
+    ]) {
+      const res = validateFacetConfig({
+        version: 1,
+        experiences: [
+          {
+            id: "bad-origin",
+            name: "Bad Origin",
+            originPath: badOriginPath,
+            match: { path: "/for/:acct" },
+            changes: [{ selector: "h1", text: "x" }],
+          },
+        ],
+      });
+      expect(res.ok, `Expected failure for originPath=${badOriginPath}`).toBe(false);
+    }
+
+    // Rejects invalid sticky durations
+    for (const badSticky of ["0m", "-1d", "7w", "always", ""]) {
+      const res = validateFacetConfig({
+        version: 1,
+        experiences: [
+          {
+            id: "bad-sticky",
+            name: "Bad Sticky",
+            sticky: badSticky,
+            match: { path: "/" },
+            changes: [{ selector: "h1", text: "x" }],
+          },
+        ],
+      });
+      expect(res.ok, `Expected failure for sticky=${badSticky}`).toBe(false);
+    }
   });
 });

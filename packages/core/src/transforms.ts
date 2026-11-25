@@ -1,4 +1,7 @@
 import type { FacetChange } from "./schema.js";
+import { escapeHtml, interpolateTemplate, type TemplateContext } from "./templates.js";
+
+export { escapeHtml };
 
 export interface ResolvedChange {
   experienceId: string;
@@ -12,18 +15,6 @@ export interface ResolvedChange {
   remove?: boolean;
   prepend?: string;
   append?: string;
-}
-
-const HTML_ESCAPE_MAP: Record<string, string> = {
-  "&": "&amp;",
-  "<": "&lt;",
-  ">": "&gt;",
-  '"': "&quot;",
-  "'": "&#39;",
-};
-
-export function escapeHtml(text: string): string {
-  return text.replace(/[&<>"']/g, (ch) => HTML_ESCAPE_MAP[ch] ?? ch);
 }
 
 export function escapeHtmlAttr(value: string): string {
@@ -56,6 +47,7 @@ export function resolveChange(
   change: FacetChange,
   experienceId: string,
   slots: Readonly<Record<string, string>>,
+  templateContext?: TemplateContext,
 ): ResolvedChange {
   const resolved: ResolvedChange = {
     experienceId,
@@ -63,21 +55,45 @@ export function resolveChange(
   };
 
   if (change.text !== undefined) {
-    resolved.text = change.text;
+    resolved.text =
+      templateContext !== undefined
+        ? interpolateTemplate(change.text, templateContext, { escapeHtml: false })
+        : change.text;
   } else if (change.html !== undefined) {
-    resolved.html = change.html;
+    resolved.html =
+      templateContext !== undefined
+        ? interpolateTemplate(change.html, templateContext, { escapeHtml: true })
+        : change.html;
   } else if (change.slot !== undefined) {
-    resolved.slot = change.slot;
-    if (Object.prototype.hasOwnProperty.call(slots, change.slot)) {
-      const slotHtml = slots[change.slot];
+    const resolvedSlot =
+      templateContext !== undefined
+        ? interpolateTemplate(change.slot, templateContext, { escapeHtml: true })
+        : change.slot;
+    resolved.slot = resolvedSlot;
+    if (Object.prototype.hasOwnProperty.call(slots, resolvedSlot)) {
+      const slotHtml = slots[resolvedSlot];
       if (slotHtml !== undefined) {
-        resolved.html = slotHtml;
+        resolved.html =
+          templateContext !== undefined
+            ? interpolateTemplate(slotHtml, templateContext, { escapeHtml: true })
+            : slotHtml;
       }
     }
   }
 
   if (change.attrs !== undefined) {
-    resolved.attrs = { ...change.attrs };
+    if (templateContext !== undefined) {
+      const attrs: Record<string, string | null> = {};
+      for (const [key, value] of Object.entries(change.attrs)) {
+        attrs[key] =
+          value === null
+            ? null
+            : interpolateTemplate(value, templateContext, { escapeHtml: false });
+      }
+      resolved.attrs = attrs;
+    } else {
+      resolved.attrs = { ...change.attrs };
+    }
   }
 
   if (change.addClass !== undefined) {
@@ -99,11 +115,17 @@ export function resolveChange(
   }
 
   if (change.prepend !== undefined) {
-    resolved.prepend = change.prepend;
+    resolved.prepend =
+      templateContext !== undefined
+        ? interpolateTemplate(change.prepend, templateContext, { escapeHtml: true })
+        : change.prepend;
   }
 
   if (change.append !== undefined) {
-    resolved.append = change.append;
+    resolved.append =
+      templateContext !== undefined
+        ? interpolateTemplate(change.append, templateContext, { escapeHtml: true })
+        : change.append;
   }
 
   return resolved;

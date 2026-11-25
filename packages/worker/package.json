@@ -3,6 +3,28 @@
   "version": "0.1.0",
   "description": "Cloudflare Worker zero-flicker edge personalization reverse proxy for Facet",
   "license": "Apache-2.0",
+  "homepage": "https://github.com/Preetish/facet#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Preetish/facet.git",
+    "directory": "packages/worker"
+  },
+  "bugs": {
+    "url": "https://github.com/Preetish/facet/issues"
+  },
+  "keywords": [
+    "facet",
+    "cloudflare-workers",
+    "htmlrewriter",
+    "personalization",
+    "edge",
+    "abm",
+    "message-match",
+    "reverse-proxy"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

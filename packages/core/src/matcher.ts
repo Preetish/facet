@@ -1,19 +1,40 @@
 import type { ContextPrimitive, RequestContext } from "./context.js";
 import type { MatchCondition, MatchOperator, MatchScalar, MatchValue } from "./schema.js";
 
+const FORBIDDEN_PARAM_NAMES = new Set(["__proto__", "constructor", "prototype"]);
+const PARAM_SEGMENT_PATTERN = /^:([a-zA-Z_][a-zA-Z0-9_]*)$/;
+
+export interface PathMatchResult {
+  matched: boolean;
+  params: Record<string, string>;
+}
+
+export interface ConditionMatchResult {
+  matched: boolean;
+  params: Record<string, string>;
+}
+
 function escapeRegExpChar(ch: string): string {
   return ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function matchGlob(pattern: string, value: string): boolean {
-  let regexSource = "^";
+function safeDecodePathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function globSegmentToRegexSource(segment: string): string {
+  let regexSource = "";
   let i = 0;
-  while (i < pattern.length) {
-    const ch = pattern[i];
+  while (i < segment.length) {
+    const ch = segment[i];
     if (ch === undefined) break;
 
     if (ch === "*") {
-      if (pattern[i + 1] === "*") {
+      if (segment[i + 1] === "*") {
         regexSource += ".*";
         i += 2;
       } else {
@@ -28,12 +49,58 @@ export function matchGlob(pattern: string, value: string): boolean {
       i += 1;
     }
   }
-  regexSource += "$";
+  return regexSource;
+}
+
+export function matchGlob(pattern: string, value: string): boolean {
+  const regexSource = `^${globSegmentToRegexSource(pattern)}$`;
   return new RegExp(regexSource).test(value);
 }
 
-function isGlobPattern(value: string): boolean {
-  return value.includes("*") || value.includes("?");
+/**
+ * Matches a URL path against a pattern supporting exact paths, globs (`*`, `**`, `?`),
+ * and named `:param` segments (e.g. `/for/:acct`, `/:locale/pricing/**`).
+ * Extracted parameter values are safely URL-decoded and guarded against prototype pollution.
+ */
+export function matchPathPattern(pattern: string, path: string): PathMatchResult {
+  if (!pattern.includes("*") && !pattern.includes("?") && !pattern.includes(":")) {
+    return { matched: pattern === path, params: {} };
+  }
+
+  const segments = pattern.split("/");
+  const paramNames: string[] = [];
+  let regexSource = "^";
+
+  for (let i = 0; i < segments.length; i++) {
+    if (i > 0) {
+      regexSource += "/";
+    }
+    const seg = segments[i] ?? "";
+    const paramMatch = PARAM_SEGMENT_PATTERN.exec(seg);
+    if (paramMatch && paramMatch[1] !== undefined) {
+      paramNames.push(paramMatch[1]);
+      regexSource += "([^/]+)";
+    } else {
+      regexSource += globSegmentToRegexSource(seg);
+    }
+  }
+  regexSource += "$";
+
+  const match = new RegExp(regexSource).exec(path);
+  if (!match) {
+    return { matched: false, params: {} };
+  }
+
+  const params: Record<string, string> = {};
+  for (let i = 0; i < paramNames.length; i++) {
+    const name = paramNames[i];
+    const rawValue = match[i + 1];
+    if (name !== undefined && rawValue !== undefined && !FORBIDDEN_PARAM_NAMES.has(name)) {
+      params[name] = safeDecodePathSegment(rawValue);
+    }
+  }
+
+  return { matched: true, params };
 }
 
 function isMatchOperator(value: MatchValue): value is MatchOperator {
@@ -53,29 +120,29 @@ function toFiniteNumber(value: ContextPrimitive): number | undefined {
   return undefined;
 }
 
-function matchScalar(
+function matchScalarWithParams(
   actual: ContextPrimitive | undefined,
   expected: MatchScalar,
-  allowGlob: boolean,
-): boolean {
+  allowPathPattern: boolean,
+): PathMatchResult {
   if (actual === undefined) {
-    return false;
+    return { matched: false, params: {} };
   }
-  if (allowGlob && typeof expected === "string" && isGlobPattern(expected)) {
-    return matchGlob(expected, String(actual));
+  if (allowPathPattern && typeof expected === "string") {
+    return matchPathPattern(expected, String(actual));
   }
-  return actual === expected;
+  return { matched: actual === expected, params: {} };
 }
 
-function matchOperator(
+function matchOperatorWithParams(
   actual: ContextPrimitive | undefined,
   operator: MatchOperator,
-  allowGlob: boolean,
-): boolean {
+  allowPathPattern: boolean,
+): PathMatchResult {
   if (operator.exists !== undefined) {
     const doesExist = actual !== undefined;
     if (doesExist !== operator.exists) {
-      return false;
+      return { matched: false, params: {} };
     }
   }
 
@@ -92,43 +159,52 @@ function matchOperator(
     operator.lte !== undefined;
 
   if (!hasNonExistsOp) {
-    return true;
+    return { matched: true, params: {} };
   }
 
   if (actual === undefined) {
-    return false;
+    return { matched: false, params: {} };
   }
 
   if (operator.equals !== undefined && actual !== operator.equals) {
-    return false;
+    return { matched: false, params: {} };
   }
 
+  let capturedParams: Record<string, string> = {};
   if (operator.in !== undefined) {
-    const matchedIn = operator.in.some((candidate) => matchScalar(actual, candidate, allowGlob));
+    let matchedIn = false;
+    for (const candidate of operator.in) {
+      const res = matchScalarWithParams(actual, candidate, allowPathPattern);
+      if (res.matched) {
+        matchedIn = true;
+        capturedParams = res.params;
+        break;
+      }
+    }
     if (!matchedIn) {
-      return false;
+      return { matched: false, params: {} };
     }
   }
 
   if (operator.contains !== undefined && !String(actual).includes(operator.contains)) {
-    return false;
+    return { matched: false, params: {} };
   }
 
   if (operator.startsWith !== undefined && !String(actual).startsWith(operator.startsWith)) {
-    return false;
+    return { matched: false, params: {} };
   }
 
   if (operator.endsWith !== undefined && !String(actual).endsWith(operator.endsWith)) {
-    return false;
+    return { matched: false, params: {} };
   }
 
   if (operator.regex !== undefined) {
     try {
       if (!new RegExp(operator.regex).test(String(actual))) {
-        return false;
+        return { matched: false, params: {} };
       }
     } catch {
-      return false;
+      return { matched: false, params: {} };
     }
   }
 
@@ -140,29 +216,43 @@ function matchOperator(
   ) {
     const numeric = toFiniteNumber(actual);
     if (numeric === undefined) {
-      return false;
+      return { matched: false, params: {} };
     }
-    if (operator.gt !== undefined && !(numeric > operator.gt)) return false;
-    if (operator.gte !== undefined && !(numeric >= operator.gte)) return false;
-    if (operator.lt !== undefined && !(numeric < operator.lt)) return false;
-    if (operator.lte !== undefined && !(numeric <= operator.lte)) return false;
+    if (operator.gt !== undefined && !(numeric > operator.gt))
+      return { matched: false, params: {} };
+    if (operator.gte !== undefined && !(numeric >= operator.gte))
+      return { matched: false, params: {} };
+    if (operator.lt !== undefined && !(numeric < operator.lt))
+      return { matched: false, params: {} };
+    if (operator.lte !== undefined && !(numeric <= operator.lte))
+      return { matched: false, params: {} };
   }
 
-  return true;
+  return { matched: true, params: capturedParams };
 }
 
-function matchesValue(
+function matchesValueWithParams(
   actual: ContextPrimitive | undefined,
   expected: MatchValue,
-  allowGlob: boolean,
-): boolean {
+  allowPathPattern: boolean,
+): PathMatchResult {
   if (Array.isArray(expected)) {
-    return expected.some((item) => matchScalar(actual, item, allowGlob));
+    for (const item of expected) {
+      const res = matchScalarWithParams(actual, item, allowPathPattern);
+      if (res.matched) {
+        return res;
+      }
+    }
+    return { matched: false, params: {} };
   }
   if (isMatchOperator(expected)) {
-    return matchOperator(actual, expected, allowGlob);
+    return matchOperatorWithParams(actual, expected, allowPathPattern);
   }
-  return matchScalar(actual, expected, allowGlob);
+  return matchScalarWithParams(actual, expected, allowPathPattern);
+}
+
+export function matchesPathValue(expected: MatchValue, path: string): PathMatchResult {
+  return matchesValueWithParams(path, expected, true);
 }
 
 function getOwnField(
@@ -229,7 +319,23 @@ function isNestedRecordKey(key: string): key is "query" | "cookie" | "header" | 
   );
 }
 
-export function matchesCondition(condition: MatchCondition, context: RequestContext): boolean {
+function mergeParams(
+  target: Record<string, string>,
+  source: Readonly<Record<string, string>>,
+): void {
+  for (const [k, v] of Object.entries(source)) {
+    if (!FORBIDDEN_PARAM_NAMES.has(k)) {
+      target[k] = v;
+    }
+  }
+}
+
+export function matchesConditionWithParams(
+  condition: MatchCondition,
+  context: RequestContext,
+): ConditionMatchResult {
+  const params: Record<string, string> = {};
+
   for (const [key, rawValue] of Object.entries(condition)) {
     if (rawValue === undefined) {
       continue;
@@ -237,24 +343,37 @@ export function matchesCondition(condition: MatchCondition, context: RequestCont
 
     if (key === "all") {
       const subConditions = rawValue as MatchCondition[];
-      if (!subConditions.every((sub) => matchesCondition(sub, context))) {
-        return false;
+      for (const sub of subConditions) {
+        const subResult = matchesConditionWithParams(sub, context);
+        if (!subResult.matched) {
+          return { matched: false, params: {} };
+        }
+        mergeParams(params, subResult.params);
       }
       continue;
     }
 
     if (key === "any") {
       const subConditions = rawValue as MatchCondition[];
-      if (!subConditions.some((sub) => matchesCondition(sub, context))) {
-        return false;
+      let anyMatched = false;
+      for (const sub of subConditions) {
+        const subResult = matchesConditionWithParams(sub, context);
+        if (subResult.matched) {
+          anyMatched = true;
+          mergeParams(params, subResult.params);
+          break;
+        }
+      }
+      if (!anyMatched) {
+        return { matched: false, params: {} };
       }
       continue;
     }
 
     if (key === "not") {
       const subCondition = rawValue as MatchCondition;
-      if (matchesCondition(subCondition, context)) {
-        return false;
+      if (matchesConditionWithParams(subCondition, context).matched) {
+        return { matched: false, params: {} };
       }
       continue;
     }
@@ -263,19 +382,60 @@ export function matchesCondition(condition: MatchCondition, context: RequestCont
       const nestedMap = rawValue as Record<string, MatchValue>;
       for (const [subKey, expected] of Object.entries(nestedMap)) {
         const actual = resolveFieldValue(context, `${key}.${subKey}`);
-        if (!matchesValue(actual, expected, false)) {
-          return false;
+        if (!matchesValueWithParams(actual, expected, false).matched) {
+          return { matched: false, params: {} };
         }
       }
       continue;
     }
 
     const actual = resolveFieldValue(context, key);
-    const allowGlob = key === "path";
-    if (!matchesValue(actual, rawValue as MatchValue, allowGlob)) {
-      return false;
+    const allowPathPattern = key === "path";
+    const fieldResult = matchesValueWithParams(actual, rawValue as MatchValue, allowPathPattern);
+    if (!fieldResult.matched) {
+      return { matched: false, params: {} };
+    }
+    if (allowPathPattern) {
+      mergeParams(params, fieldResult.params);
     }
   }
 
-  return true;
+  return { matched: true, params };
+}
+
+export function matchesCondition(condition: MatchCondition, context: RequestContext): boolean {
+  return matchesConditionWithParams(condition, context).matched;
+}
+
+/**
+ * Best-effort extraction of named `:param` path parameters from a `MatchCondition`
+ * against a path, ignoring non-path predicates (used for preview mode).
+ */
+export function extractPathParams(condition: MatchCondition, path: string): Record<string, string> {
+  const params: Record<string, string> = {};
+
+  if (condition.path !== undefined) {
+    const res = matchesPathValue(condition.path, path);
+    if (res.matched) {
+      mergeParams(params, res.params);
+    }
+  }
+
+  if (condition.all !== undefined) {
+    for (const sub of condition.all) {
+      mergeParams(params, extractPathParams(sub, path));
+    }
+  }
+
+  if (condition.any !== undefined) {
+    for (const sub of condition.any) {
+      const subParams = extractPathParams(sub, path);
+      if (Object.keys(subParams).length > 0) {
+        mergeParams(params, subParams);
+        break;
+      }
+    }
+  }
+
+  return params;
 }

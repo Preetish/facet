@@ -3,6 +3,28 @@
   "version": "0.1.0",
   "description": "Hydration-safe Next.js Middleware and Server Component helpers for Facet",
   "license": "Apache-2.0",
+  "homepage": "https://github.com/Preetish/facet#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Preetish/facet.git",
+    "directory": "packages/next"
+  },
+  "bugs": {
+    "url": "https://github.com/Preetish/facet/issues"
+  },
+  "keywords": [
+    "facet",
+    "nextjs",
+    "react",
+    "server-components",
+    "middleware",
+    "personalization",
+    "abm",
+    "message-match"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

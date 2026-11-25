@@ -3,6 +3,7 @@ import {
   buildAnalyticsSnippet,
   buildContextFromRequest,
   evaluate,
+  normalizeNowSeconds,
   parseFacetYaml,
   parsePreviewParams,
   toAnalyticsExposures,
@@ -12,6 +13,7 @@ import {
   type FacetConfig,
   type GeoContext,
   type ParseFacetResult,
+  type StickyCookieDirective,
 } from "@facet/core";
 import { runEnrichment, type EnrichmentAdapter, type EnrichmentCacheStore } from "./enrichment.js";
 import { rewriteHtmlResponse, type CreateRewriterFn } from "./rewriter.js";
@@ -90,17 +92,82 @@ export function isHtmlContentType(contentType: string | null): boolean {
   return mediaType === "text/html" || mediaType === "application/xhtml+xml";
 }
 
-export function buildOriginUrl(request: Request, origin: string): URL {
+function safeDecodeUri(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function hasUnsafePathTraversal(pathname: string): boolean {
+  return (
+    pathname.startsWith("//") ||
+    pathname.includes("\\") ||
+    /[\r\n]/.test(pathname) ||
+    /(^|\/)\.\.(\/|$)/.test(pathname)
+  );
+}
+
+function isSafeOriginPath(rawPath: string): boolean {
+  if (!rawPath.startsWith("/") || hasUnsafePathTraversal(rawPath)) {
+    return false;
+  }
+  const pathnamePart = rawPath.split(/[?#]/, 1)[0] ?? "";
+  if (hasUnsafePathTraversal(pathnamePart)) {
+    return false;
+  }
+  const decoded = safeDecodeUri(pathnamePart);
+  if (hasUnsafePathTraversal(decoded)) {
+    return false;
+  }
+  const doubleDecoded = safeDecodeUri(decoded);
+  if (hasUnsafePathTraversal(doubleDecoded)) {
+    return false;
+  }
+  return true;
+}
+
+export function buildOriginUrl(
+  request: Request,
+  origin: string,
+  originPathOverride?: string | null,
+): URL {
   const incomingUrl = new URL(request.url);
   const originUrl = new URL(origin);
 
   const basePath = originUrl.pathname.replace(/\/+$/, "");
-  const incomingPath = incomingUrl.pathname.startsWith("/")
+  let targetPathname = incomingUrl.pathname.startsWith("/")
     ? incomingUrl.pathname
     : `/${incomingUrl.pathname}`;
+  let targetSearch = incomingUrl.search;
 
-  originUrl.pathname = basePath.length > 0 ? `${basePath}${incomingPath}` : incomingPath;
-  originUrl.search = incomingUrl.search;
+  if (
+    typeof originPathOverride === "string" &&
+    originPathOverride.length > 0 &&
+    isSafeOriginPath(originPathOverride)
+  ) {
+    const hashIndex = originPathOverride.indexOf("#");
+    const withoutHash =
+      hashIndex >= 0 ? originPathOverride.slice(0, hashIndex) : originPathOverride;
+    const queryIndex = withoutHash.indexOf("?");
+    const overridePathname = queryIndex >= 0 ? withoutHash.slice(0, queryIndex) : withoutHash;
+    const overrideQuery = queryIndex >= 0 ? withoutHash.slice(queryIndex + 1) : "";
+
+    targetPathname = overridePathname;
+    if (overrideQuery.length > 0) {
+      const merged = new URLSearchParams(incomingUrl.search);
+      const overrideParams = new URLSearchParams(overrideQuery);
+      for (const [key, value] of overrideParams.entries()) {
+        merged.set(key, value);
+      }
+      const serialized = merged.toString();
+      targetSearch = serialized.length > 0 ? `?${serialized}` : "";
+    }
+  }
+
+  originUrl.pathname = basePath.length > 0 ? `${basePath}${targetPathname}` : targetPathname;
+  originUrl.search = targetSearch;
   originUrl.hash = "";
   return originUrl;
 }
@@ -134,6 +201,26 @@ export function formatVisitorCookie(
     "HttpOnly",
     `Max-Age=${VISITOR_COOKIE_MAX_AGE_SECONDS}`,
   ];
+  if (secure) {
+    parts.push("Secure");
+  }
+  return parts.join("; ");
+}
+
+export function formatStickyCookie(cookie: StickyCookieDirective, secure: boolean): string {
+  const parts = [
+    `${encodeURIComponent(cookie.name)}=${encodeURIComponent(cookie.value)}`,
+    "Path=/",
+    "SameSite=Lax",
+    "HttpOnly",
+  ];
+  if (
+    cookie.maxAgeSeconds !== null &&
+    Number.isFinite(cookie.maxAgeSeconds) &&
+    cookie.maxAgeSeconds > 0
+  ) {
+    parts.push(`Max-Age=${Math.floor(cookie.maxAgeSeconds)}`);
+  }
   if (secure) {
     parts.push("Secure");
   }
@@ -233,25 +320,16 @@ async function handleFacetRequestInternal<Env extends FacetWorkerEnv>(
 ): Promise<Response> {
   const fetchFn = options.fetchFn ?? fetch;
   const originBase = await resolveOrigin(options.origin, request, env);
-  const targetUrl = buildOriginUrl(request, originBase);
-  const originRequest = createOriginRequest(request, targetUrl);
-
   const method = request.method.toUpperCase();
   const incomingUrl = new URL(request.url);
 
+  const fetchOriginalFallback = (): Promise<Response> => {
+    const fallbackUrl = buildOriginUrl(request, originBase);
+    return fetchFn(createOriginRequest(request, fallbackUrl));
+  };
+
   if ((method !== "GET" && method !== "HEAD") || isStaticAssetPath(incomingUrl.pathname)) {
-    return fetchFn(originRequest);
-  }
-
-  const originResponse = await fetchFn(originRequest);
-
-  if (
-    originResponse.status === 204 ||
-    originResponse.status === 205 ||
-    (originResponse.status >= 300 && originResponse.status < 400) ||
-    !isHtmlContentType(originResponse.headers.get("content-type"))
-  ) {
-    return originResponse;
+    return fetchOriginalFallback();
   }
 
   let config: FacetConfig;
@@ -259,12 +337,12 @@ async function handleFacetRequestInternal<Env extends FacetWorkerEnv>(
     const parsedConfig = await resolveConfig(options.config, request, env, getCachedStaticConfig);
     if (!parsedConfig.ok) {
       options.onError?.(parsedConfig.errors, "config");
-      return originResponse;
+      return fetchOriginalFallback();
     }
     config = parsedConfig.config;
   } catch (error: unknown) {
     options.onError?.(error, "config");
-    return originResponse;
+    return fetchOriginalFallback();
   }
 
   const geo = extractCloudflareGeo(request);
@@ -273,9 +351,22 @@ async function handleFacetRequestInternal<Env extends FacetWorkerEnv>(
     geo,
   });
 
+  let nowValue: number | undefined;
+  if (options.now !== undefined) {
+    try {
+      nowValue = options.now();
+    } catch (error: unknown) {
+      options.onError?.(error, "evaluate");
+      return fetchOriginalFallback();
+    }
+  }
+
   const evaluateOptions: EvaluateOptions = {};
   if (options.generateVisitorId !== undefined) {
     evaluateOptions.generateVisitorId = options.generateVisitorId;
+  }
+  if (nowValue !== undefined) {
+    evaluateOptions.now = nowValue;
   }
 
   let previewVerified = false;
@@ -297,7 +388,7 @@ async function handleFacetRequestInternal<Env extends FacetWorkerEnv>(
         token: parsedPreview.signature,
         secret,
         ...(parsedPreview.bucket !== undefined ? { bucket: parsedPreview.bucket } : {}),
-        ...(options.now !== undefined ? { now: options.now() } : {}),
+        ...(nowValue !== undefined ? { now: normalizeNowSeconds(nowValue) } : {}),
       });
 
       if (verification.valid) {
@@ -355,6 +446,19 @@ async function handleFacetRequestInternal<Env extends FacetWorkerEnv>(
     evaluation = evaluate(config, context, evaluateOptions);
   } catch (error: unknown) {
     options.onError?.(error, "evaluate");
+    return fetchOriginalFallback();
+  }
+
+  const targetUrl = buildOriginUrl(request, originBase, evaluation.originPath);
+  const originRequest = createOriginRequest(request, targetUrl);
+  const originResponse = await fetchFn(originRequest);
+
+  if (
+    originResponse.status === 204 ||
+    originResponse.status === 205 ||
+    (originResponse.status >= 300 && originResponse.status < 400) ||
+    !isHtmlContentType(originResponse.headers.get("content-type"))
+  ) {
     return originResponse;
   }
 
@@ -390,12 +494,22 @@ async function handleFacetRequestInternal<Env extends FacetWorkerEnv>(
     }
   }
 
-  const shouldSetCookie =
+  const shouldSetVisitorCookie =
     evaluation.isNewVisitor && !evaluation.previewMode && config.experiences.length > 0;
-  const effectiveCacheControl =
-    evaluation.cacheControl ?? (shouldSetCookie ? PERSONALIZED_CACHE_CONTROL : null);
+  const stickyCookieToSet =
+    !evaluation.previewMode && evaluation.stickyCookie !== null ? evaluation.stickyCookie : null;
+  const shouldSetStickyCookie = stickyCookieToSet !== null;
 
-  if (!shouldSetCookie && effectiveCacheControl === null) {
+  const effectiveCacheControl =
+    evaluation.cacheControl ??
+    (evaluation.personalized ||
+    evaluation.previewMode ||
+    shouldSetVisitorCookie ||
+    shouldSetStickyCookie
+      ? PERSONALIZED_CACHE_CONTROL
+      : null);
+
+  if (!shouldSetVisitorCookie && !shouldSetStickyCookie && effectiveCacheControl === null) {
     return finalResponse;
   }
 
@@ -405,12 +519,15 @@ async function handleFacetRequestInternal<Env extends FacetWorkerEnv>(
     appendVaryHeader(headers, "Cookie");
   }
 
-  if (shouldSetCookie) {
-    const isHttps = incomingUrl.protocol === "https:";
+  const isHttps = incomingUrl.protocol === "https:";
+  if (shouldSetVisitorCookie) {
     headers.append(
       "Set-Cookie",
       formatVisitorCookie(config.settings.cookieName, evaluation.visitorId, isHttps),
     );
+  }
+  if (stickyCookieToSet !== null) {
+    headers.append("Set-Cookie", formatStickyCookie(stickyCookieToSet, isHttps));
   }
 
   return new Response(finalResponse.body, {

@@ -182,4 +182,225 @@ experiences:
     expect(codes).toContain("shadowed_experience");
     expect(stdout.join("")).toContain("Warnings");
   });
+
+  it("reports validation errors on invalid template syntax across originPath, lookup.key, changes, and settings.slots", async () => {
+    const cwd = await makeTempDir();
+    const badTplPath = path.join(cwd, "bad-templates.yaml");
+    await writeFile(
+      badTplPath,
+      `version: 1
+settings:
+  slots:
+    broken-slot: "<div>{{unknown.field}}</div>"
+data:
+  accounts:
+    stripe:
+      name: "Stripe"
+experiences:
+  - id: tpl-errors
+    name: "Template Errors"
+    originPath: "/landing/{{unclosed"
+    match:
+      path: "/for/:acct"
+    lookup:
+      table: "accounts"
+      key: "{{}}"
+    changes:
+      - selector: "h1"
+        text: "Hello {{data.name | badfilter('x')}}"
+      - selector: "#box"
+        html: "<strong>{{data.__proto__}}</strong>"
+      - selector: "#extra"
+        prepend: "<span>{{query.x | default(unquoted)}}</span>"
+        append: "<span>extra }}</span>"
+        attrs:
+          href: "/demo?acct={{params.acct"
+`,
+      "utf8",
+    );
+
+    const { stderr, io } = createTestIO(cwd);
+    const result = await runValidateCommand(badTplPath, io);
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.errors.every((e) => e.code === "invalid_template_syntax")).toBe(true);
+
+    const paths = result.errors.map((e) => e.path);
+    expect(paths).toContain("settings.slots.broken-slot");
+    expect(paths).toContain("experiences[0].originPath");
+    expect(paths).toContain("experiences[0].lookup.key");
+    expect(paths).toContain("experiences[0].changes[0].text");
+    expect(paths).toContain("experiences[0].changes[1].html");
+    expect(paths).toContain("experiences[0].changes[2].prepend");
+    expect(paths).toContain("experiences[0].changes[2].append");
+    expect(paths).toContain("experiences[0].changes[2].attrs.href");
+    expect(stderr.join("")).toContain("Invalid template syntax");
+  });
+
+  it("warns on missing data table, unreferenced {{params.*}}, and suspicious originPath", async () => {
+    const cwd = await makeTempDir();
+    const warnPath = path.join(cwd, "v02-warnings.yaml");
+    await writeFile(
+      warnPath,
+      `version: 1
+data:
+  accounts:
+    stripe:
+      name: "Stripe"
+experiences:
+  - id: missing-table-and-param
+    name: "Missing table and param"
+    originPath: "/%2e%2e/secret"
+    match:
+      path: "/for/:acct"
+    lookup:
+      table: "nonexistent"
+      key: "{{params.acct}}"
+    changes:
+      - selector: "h1"
+        text: "Hi {{params.missingParam}}"
+  - id: leading-template-origin
+    name: "Leading template origin"
+    originPath: "/{{params.slug}}"
+    match:
+      path: "/p/:slug"
+    changes:
+      - selector: "h1"
+        text: "Slug {{params.slug}}"
+`,
+      "utf8",
+    );
+
+    const { io } = createTestIO(cwd);
+    const result = await runValidateCommand(warnPath, io);
+    expect(result.ok).toBe(true);
+    expect(result.exitCode).toBe(0);
+
+    expect(
+      result.warnings.some(
+        (w) => w.code === "missing_data_table" && w.experienceId === "missing-table-and-param",
+      ),
+    ).toBe(true);
+    expect(
+      result.warnings.some(
+        (w) =>
+          w.code === "unreferenced_path_param" &&
+          w.experienceId === "missing-table-and-param" &&
+          w.message.includes("params.missingParam"),
+      ),
+    ).toBe(true);
+    // Declared :acct should NOT warn as unreferenced
+    expect(
+      result.warnings.some(
+        (w) => w.code === "unreferenced_path_param" && w.message.includes("params.acct"),
+      ),
+    ).toBe(false);
+    expect(
+      result.warnings.some(
+        (w) => w.code === "suspicious_origin_path" && w.experienceId === "missing-table-and-param",
+      ),
+    ).toBe(true);
+    expect(
+      result.warnings.some(
+        (w) => w.code === "suspicious_origin_path" && w.experienceId === "leading-template-origin",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not trigger false shadowed_experience warnings for experiences with distinct required lookup tables or keys", async () => {
+    const cwd = await makeTempDir();
+    const lookupPath = path.join(cwd, "lookup-shadowing.yaml");
+    await writeFile(
+      lookupPath,
+      `version: 1
+data:
+  enterprise:
+    stripe:
+      name: "Stripe"
+  smb:
+    acme:
+      name: "Acme"
+experiences:
+  - id: wildcard-enterprise
+    name: "Enterprise Lookup"
+    priority: 100
+    stopOnMatch: true
+    match: {}
+    lookup:
+      table: "enterprise"
+      key: "{{query.acct}}"
+      required: true
+    changes:
+      - selector: "h1"
+        text: "Enterprise: {{data.name}}"
+  - id: wildcard-smb
+    name: "SMB Lookup"
+    priority: 90
+    stopOnMatch: true
+    match: {}
+    lookup:
+      table: "smb"
+      key: "{{query.acct}}"
+      required: true
+    changes:
+      - selector: "h1"
+        text: "SMB: {{data.name}}"
+  - id: path-table-a
+    name: "Path Table A"
+    priority: 80
+    stopOnMatch: true
+    match:
+      path: "/for/:acct"
+    lookup:
+      table: "enterprise"
+      key: "{{params.acct}}"
+    changes:
+      - selector: "h1"
+        text: "A: {{data.name}}"
+  - id: path-table-b
+    name: "Path Table B"
+    priority: 70
+    stopOnMatch: true
+    match:
+      path: "/for/:acct"
+    lookup:
+      table: "smb"
+      key: "{{params.acct}}"
+    changes:
+      - selector: "h1"
+        text: "B: {{data.name}}"
+  - id: path-fallback
+    name: "Path Fallback (no lookup)"
+    priority: 60
+    stopOnMatch: true
+    match:
+      path: "/for/:acct"
+    changes:
+      - selector: "h1"
+        text: "Fallback for {{params.acct}}"
+  - id: path-actually-shadowed
+    name: "Shadowed by fallback"
+    priority: 50
+    stopOnMatch: true
+    match:
+      path: "/for/:acct"
+    lookup:
+      table: "enterprise"
+      key: "{{params.acct}}"
+    changes:
+      - selector: "h1"
+        text: "Unreachable"
+`,
+      "utf8",
+    );
+
+    const { io } = createTestIO(cwd);
+    const result = await runValidateCommand(lookupPath, io);
+    expect(result.ok).toBe(true);
+
+    const shadowedIds = result.warnings
+      .filter((w) => w.code === "shadowed_experience")
+      .map((w) => w.experienceId);
+    expect(shadowedIds).toEqual(["path-actually-shadowed"]);
+  });
 });

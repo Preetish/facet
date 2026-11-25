@@ -119,9 +119,10 @@ node packages/cli/dist/bin.js preview \
 Now open these URLs in your browser:
 
 - **Default page:** `http://127.0.0.1:8787/` — renders the untouched Meridian Cloud landing page.
-- **Paid ad message-match:** `http://127.0.0.1:8787/?utm_campaign=fintech-q4` — matches `fintech-abm` (with a 20% deterministic control holdout).
-- **1:1 ABM link:** `http://127.0.0.1:8787/?acct=stripe` — matches `stripe-abm` (priority 100), swapping the eyebrow, headline, subhead, CTA `href`, and `#logo-strip` slot.
-- **Preview Bar:** Use the floating bar in the bottom-right corner to switch between `Auto`, `Default`, `Control`, `stripe-abm`, `fintech-abm`, and `eu-returning-visitor` — or edit `examples/basic-site/facet.yaml` and refresh to see changes immediately.
+- **Virtual 1:1 ABM page (`/for/:acct` + `originPath: "/"`):** `http://127.0.0.1:8787/for/stripe` or `http://127.0.0.1:8787/for/plaid` — fetches `/` from the origin so `/for/:acct` never 404s, looks up the account row in `data.accounts`, interpolates `{{data.* | default(...)}}` copy, and sets a 7-day `__facet_sticky` cookie.
+- **1:1 ABM query link:** `http://127.0.0.1:8787/?acct=stripe` or `http://127.0.0.1:8787/?acct=ramp` — matches `abm-query-account` from the same `data.accounts` table and stays sticky across subsequent visits to `/`.
+- **Paid ad message-match:** `http://127.0.0.1:8787/?utm_campaign=fintech-q4` — matches `fintech-abm` (with a 20% deterministic control holdout and 7-day session stickiness).
+- **Preview Bar:** Use the floating bar in the bottom-right corner to switch between `Auto`, `Default`, `Control`, `abm-account-page`, `abm-query-account`, `fintech-abm`, and `eu-returning-visitor` — or edit `examples/basic-site/facet.yaml` and refresh to see changes immediately.
 
 ---
 
@@ -134,6 +135,7 @@ version: 1
 
 settings:
   cookieName: "__facet_vid" # Default: "__facet_vid"
+  stickyCookieName: "__facet_sticky" # Default: "__facet_sticky"
   previewParam: "__facet_preview" # Default: "__facet_preview"
   previewSigParam: "__facet_sig" # Default: "__facet_sig"
   analytics:
@@ -145,15 +147,43 @@ settings:
   slots:
     fintech-logos: '<div class="logo-row"><span>Ramp</span><span>Mercury</span></div>'
 
+# Optional inline lookup tables (or load CSVs at runtime with parseCsvTable)
+data:
+  accounts:
+    stripe:
+      name: "Stripe"
+      headline: "Zero-latency edge routing built for Stripe's global scale"
+      cta: "Open Stripe's architecture walkthrough"
+
 experiences:
-  - id: fintech-abm # Required unique ID: /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
+  - id: abm-account-page # Required unique ID: /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
+    name: "1:1 ABM Virtual Account Page"
+    priority: 100
+    originPath: "/" # Fetch "/" from origin for virtual URLs like /for/stripe
+    sticky: "7d" # Persist match + attribution signals for 7 days
+    match:
+      path: "/for/:acct" # Named :param segments extracted into {{params.*}}
+    lookup:
+      table: "accounts" # References top-level data.accounts
+      key: "{{params.acct}}"
+      required: true # Default: true (skip experience if key is missing)
+    changes:
+      - selector: "h1"
+        text: '{{data.headline | default("Edge infrastructure for your team")}}'
+      - selector: "[data-cta='hero']"
+        text: '{{data.cta | default("Book a demo")}}'
+        attrs:
+          href: "/demo?acct={{params.acct}}"
+
+  - id: fintech-abm
     name: "Fintech ABM & Paid Search"
     enabled: true # Default: true
     priority: 10 # Default: 0 (higher priority evaluates first)
     stopOnMatch: true # Default: true (stop after first matching experience)
     holdout: 0.2 # 0..1 deterministic sticky control group (default: 0)
+    sticky: "7d" # Optional: true | "session" | "<n>m" | "<n>h" | "<n>d"
     match:
-      path: "/" # Supports globs ("/blog/*", "/for/**")
+      path: "/" # Supports exact paths, globs ("/blog/*", "/for/**"), and :params
       any: # Combinators: `all`, `any`, `not`
         - utm_campaign: ["fintech-q4", "abm-banking"]
         - query.acct: ["stripe", "plaid"]
@@ -171,11 +201,57 @@ experiences:
 
 ### Supported Match Fields & Operators
 
-- **Top-level fields:** `path`, `host`, `utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`, `referrer`, `returning` (`boolean`)
+- **Top-level fields:** `path` (supports exact paths, globs `*` / `**` / `?`, and named `:param` segments like `/for/:acct`), `host`, `utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`, `referrer`, `returning` (`boolean`)
 - **Dotted or nested maps:** `query.*`, `cookie.*`, `header.*`, `geo.*` (`country`, `region`, `city`, `continent`, `timezone`), `company.*` (`name`, `domain`, `industry`, `size`, `employees`, `revenue`, or custom enrichment keys)
 - **Combinators:** `all` (AND array), `any` (OR array), `not` (negated condition)
 - **Match values:** scalar (`"stripe"`, `true`, `100`), array of scalars (`["fintech-q4", "abm-banking"]`), or operator object:
   - `equals`, `in`, `contains`, `startsWith`, `endsWith`, `regex`, `gt`, `gte`, `lt`, `lte`, `exists`
+
+### Virtual ABM URLs (`originPath`) & Named Path Parameters (`:param`)
+
+Ship clean 1:1 account URLs (such as `/for/stripe` or `/for/plaid`) without creating duplicate pages in your CMS:
+
+- **Named `:param` paths:** Use `:param` segments in `match.path` (e.g. `/for/:acct`, `/:locale/pricing/**`). Matched segments are safely URL-decoded and exposed as `{{params.<name>}}`.
+- **`originPath`:** Tell `@facet/worker`, `@facet/next`, and `facet preview` which origin path to fetch or rewrite internally (e.g. `originPath: "/"`). Incoming query strings are preserved, control-group visitors still receive the rewritten origin page (never a 404), and SSRF / path-traversal sequences (`//`, `\`, `..`) are rejected automatically.
+
+### Data Lookup Tables (`data:`, `lookup:`, and `parseCsvTable`)
+
+Scale one experience rule across hundreds of target accounts with zero per-account YAML duplication:
+
+- Define keyed tables inline under top-level `data.<tableName>.<key>`, or load a CSV file at startup using `parseCsvTable(csvString, keyColumn)` from `@facet/core` (pure RFC-4180 parser, zero Node `fs` dependencies) and merge it into `config.data`:
+
+```ts
+import { parseCsvTable, parseFacetYaml } from "@facet/core";
+import facetYaml from "./facet.yaml";
+import accountsCsv from "./accounts.csv";
+
+const parsed = parseFacetYaml(facetYaml);
+if (parsed.ok) {
+  parsed.config.data = {
+    ...parsed.config.data,
+    accounts: parseCsvTable(accountsCsv, "slug"),
+  };
+}
+```
+
+- Attach `lookup: { table: "accounts", key: "{{params.acct}}", required: true }` to an experience. When `required: true` (the default), the experience only matches if the resolved key exists in `config.data[table]`. Matched row fields become available via `{{data.*}}`.
+
+### Dynamic Variables & XSS-Safe Templating (`{{...}}`)
+
+Interpolate dynamic values across `originPath`, `lookup.key`, `settings.slots`, and change `text`, `html`, `slot`, `prepend`, `append`, and `attrs`:
+
+- **Syntax:** `{{expr}}` or `{{expr | default("fallback")}}` (single or double quotes).
+- **Allowed roots:** `data.*`, `company.*`, `query.*`, `geo.*`, `params.*`, plus top-level `utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`. Prototype keys (`__proto__`, `constructor`, `prototype`) are strictly blocked.
+- **Automatic XSS protection:** Interpolated variable values inside `html`, `slot`, `prepend`, and `append` are **always HTML-escaped** (`&`, `<`, `>`, `"`, `'`) so untrusted query/path input can never inject scripts. `text` and `attrs` interpolate raw strings and rely on downstream text/attribute escaping.
+- **Static validation:** `npx facet validate` checks every template expression with `validateTemplateSyntax` and warns on missing `data` tables or unreferenced `{{params.*}}` placeholders.
+
+### Session-Sticky Matching (`sticky:`)
+
+Keep a visitor's campaign or ABM experience consistent as they navigate from `/` to `/pricing` or `/demo` without carrying UTM query parameters on every link:
+
+- Add `sticky: true` / `sticky: "session"` (session cookie, no `Max-Age`) or a bounded duration (`"30m"`, `"24h"`, `"7d"`) to any experience.
+- Facet stores compact, non-sensitive sticky state (matched experience IDs, optional `dataKey`, and attribution signals `utm_*` / `acct`) in the first-party `__facet_sticky` cookie (`settings.stickyCookieName`).
+- Incoming URL parameters always take precedence over sticky signals, preview mode suppresses sticky cookie writes, and responses that read or write sticky state automatically set `Cache-Control: private, no-store` and `Vary: Cookie`.
 
 ### Supported DOM Transforms (`changes`)
 
@@ -277,12 +353,12 @@ export default async function HomePage() {
 
 ## Packages
 
-| Package                              | Description                                                    | Key Exports                                                                                                                                                                                |
-| ------------------------------------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`@facet/core`](./packages/core)     | Pure, zero-I/O TypeScript engine (Web Standard APIs only)      | `parseFacetYaml`, `validateFacetConfig`, `exportFacetJsonSchema`, `evaluate`, `assignBucket`, `buildContextFromRequest`, `signPreviewToken`, `verifyPreviewToken`, `buildAnalyticsSnippet` |
-| [`@facet/worker`](./packages/worker) | Cloudflare Worker reverse proxy using streaming `HTMLRewriter` | `createFacetWorker`, `handleFacetRequest`, `createIpinfoAdapter`, `createWebhookEnrichmentAdapter`, `runEnrichment`, `rewriteHtmlResponse`                                                 |
-| [`@facet/cli`](./packages/cli)       | Local CLI & live preview proxy with Preview Bar                | `facet init`, `facet validate`, `facet preview`, `facet preview-link`, `facet schema`                                                                                                      |
-| [`@facet/next`](./packages/next)     | Hydration-safe Next.js Middleware & Server Components          | `createFacetMiddleware`, `readFacetState`, `FacetSlot`, `FacetAnalytics`                                                                                                                   |
+| Package                              | Description                                                    | Key Exports                                                                                                                                                                                                                                              |
+| ------------------------------------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@facet/core`](./packages/core)     | Pure, zero-I/O TypeScript engine (Web Standard APIs only)      | `parseFacetYaml`, `validateFacetConfig`, `exportFacetJsonSchema`, `evaluate`, `assignBucket`, `buildContextFromRequest`, `parseCsvTable`, `interpolateTemplate`, `validateTemplateSyntax`, `parseStickyCookie`, `signPreviewToken`, `verifyPreviewToken` |
+| [`@facet/worker`](./packages/worker) | Cloudflare Worker reverse proxy using streaming `HTMLRewriter` | `createFacetWorker`, `handleFacetRequest`, `createIpinfoAdapter`, `createWebhookEnrichmentAdapter`, `runEnrichment`, `rewriteHtmlResponse`                                                                                                               |
+| [`@facet/cli`](./packages/cli)       | Local CLI & live preview proxy with Preview Bar                | `facet init`, `facet validate`, `facet preview`, `facet preview-link`, `facet schema`                                                                                                                                                                    |
+| [`@facet/next`](./packages/next)     | Hydration-safe Next.js Middleware & Server Components          | `createFacetMiddleware`, `readFacetState`, `FacetSlot`, `FacetAnalytics`                                                                                                                                                                                 |
 
 ---
 
@@ -290,8 +366,8 @@ export default async function HomePage() {
 
 1. **Always fail open:** Invalid `facet.yaml`, enrichment timeouts, unexpected evaluation errors, or HTML rewrite failures immediately pass through the untouched origin response. Facet never takes down your marketing site.
 2. **Strict enrichment timeout & caching:** BYOK enrichment adapters (`createIpinfoAdapter`, `createWebhookEnrichmentAdapter`, or custom `EnrichmentAdapter`) enforce a hard timeout (`150ms` default via `AbortController`) and cache results (including negative misses) in Cloudflare KV via `ctx.waitUntil`.
-3. **Safe HTTP caching:** Personalized or cookie-setting responses always set `Cache-Control: private, no-store` and `Vary: Cookie` so CDNs never leak one segment's HTML to another visitor. Static assets (`.js`, `.css`, images, fonts, etc.) and non-HTML responses bypass rewriting completely.
-4. **Zero secret leaks:** Enrichment tokens, internal account lists, and unpublished rules never reach the browser. Analytics payloads emit strictly `{ experienceId, bucket }`, preview URLs use Web Crypto HMAC-SHA256 with constant-time verification, and `@facet/next` strips incoming `x-facet-state` headers to prevent spoofing.
+3. **Safe HTTP caching:** Personalized, sticky-matched, or cookie-setting responses always set `Cache-Control: private, no-store` and `Vary: Cookie` so CDNs never leak one segment's HTML to another visitor. Static assets (`.js`, `.css`, images, fonts, etc.) and non-HTML responses bypass rewriting completely.
+4. **Zero secret leaks & XSS-safe templating:** Enrichment tokens, internal account lists, and unpublished rules never reach the browser. Analytics payloads emit strictly `{ experienceId, bucket }`, preview URLs use Web Crypto HMAC-SHA256 with constant-time verification, `{{...}}` interpolation HTML-escapes values inside HTML contexts (`html`/`slot`/`prepend`/`append`) and blocks prototype keys, `originPath` rejects protocol-relative and traversal paths, and `@facet/next` strips incoming `x-facet-state` headers to prevent spoofing.
 5. **Minimal edge footprint:** `@facet/core` and `@facet/worker` rely solely on Web Standard APIs (`URL`, `Headers`, `Request`, `Response`, `crypto.subtle`) for near-zero cold starts.
 
 ---

@@ -3,6 +3,7 @@ export {
   buildOriginUrl,
   createFacetWorker,
   extractCloudflareGeo,
+  formatStickyCookie,
   formatVisitorCookie,
   handleFacetRequest,
   isHtmlContentType,

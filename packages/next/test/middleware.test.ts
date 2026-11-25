@@ -10,6 +10,7 @@ import {
   serializeFacetState,
   type FacetRequestState,
 } from "../src/index.js";
+import { buildSafeRewriteUrl } from "../src/middleware.js";
 
 const SAMPLE_YAML = `
 version: 1
@@ -478,5 +479,336 @@ describe("@facet/next middleware", () => {
       expect(source, `${file} must not import Node built-ins`).not.toMatch(forbiddenImportPattern);
       expect(source, `${file} must not reference Node Buffer`).not.toMatch(forbiddenBufferPattern);
     }
+  });
+
+  it("rewrites virtual URLs (/for/stripe -> /) via NextResponse.rewrite for variant, control, and preview while preserving query params and x-facet-state", async () => {
+    const secret = "abm-preview-secret";
+    const abmYaml = `
+version: 1
+settings:
+  cookieName: "__facet_vid"
+  stickyCookieName: "__facet_sticky"
+  analytics:
+    providers: ["ga4"]
+data:
+  accounts:
+    stripe:
+      name: "Stripe"
+      cta: "Book Stripe Demo"
+experiences:
+  - id: abm-account-page
+    name: "ABM Account Page"
+    priority: 20
+    match:
+      path: "/for/:slug"
+    originPath: "/"
+    lookup:
+      table: accounts
+      key: "{{params.slug}}"
+    sticky: "7d"
+    holdout: 0
+    changes:
+      - selector: "#hero-headline"
+        text: "Built for {{data.name}} ({{params.slug}})"
+      - selector: "[data-facet-slot='hero-cta']"
+        text: "{{data.cta}}"
+        attrs:
+          href: "/demo?acct={{params.slug}}"
+  - id: abm-control-page
+    name: "ABM Control Holdout Page"
+    priority: 20
+    match:
+      path: "/holdout/:slug"
+    originPath: "/"
+    lookup:
+      table: accounts
+      key: "{{params.slug}}"
+    holdout: 1
+    changes:
+      - selector: "#hero-headline"
+        text: "Should not render in control"
+`;
+
+    let nowSec = 1_700_000_000;
+    const middleware = createFacetMiddleware({
+      config: abmYaml,
+      previewSecret: secret,
+      generateVisitorId: () => "vis_abm_v2",
+      now: () => nowSec,
+    });
+
+    // 1. Variant match on /for/stripe?utm_source=linkedin&ref=ae -> rewrites to / preserving query params
+    const variantReq = new NextRequest("https://example.com/for/stripe?utm_source=linkedin&ref=ae");
+    const variantRes = await middleware(variantReq);
+
+    expect(variantRes.headers.get("x-middleware-rewrite")).toBe(
+      "https://example.com/?utm_source=linkedin&ref=ae",
+    );
+    expect(variantRes.headers.get("x-middleware-next")).toBeNull();
+    expect(variantRes.headers.get("Cache-Control")).toBe(PERSONALIZED_CACHE_CONTROL);
+    expect(variantRes.headers.get("Vary")).toContain("Cookie");
+
+    const variantState = deserializeFacetState(getForwardedHeader(variantRes, FACET_STATE_HEADER));
+    expect(variantState.matched).toEqual([{ experienceId: "abm-account-page", bucket: "variant" }]);
+    expect(variantState.personalized).toBe(true);
+    expect(variantState.changes[0]?.text).toBe("Built for Stripe (stripe)");
+    expect(variantState.changes[1]?.text).toBe("Book Stripe Demo");
+    expect(variantState.changes[1]?.attrs).toEqual({ href: "/demo?acct=stripe" });
+
+    // 2. Control holdout match on /holdout/stripe?ref=ctrl -> STILL rewrites to / so it doesn't 404
+    const controlReq = new NextRequest("https://example.com/holdout/stripe?ref=ctrl");
+    const controlRes = await middleware(controlReq);
+
+    expect(controlRes.headers.get("x-middleware-rewrite")).toBe("https://example.com/?ref=ctrl");
+    expect(controlRes.headers.get("Cache-Control")).toBe(PERSONALIZED_CACHE_CONTROL);
+    expect(controlRes.headers.get("Vary")).toContain("Cookie");
+
+    const controlState = deserializeFacetState(getForwardedHeader(controlRes, FACET_STATE_HEADER));
+    expect(controlState.matched).toEqual([{ experienceId: "abm-control-page", bucket: "control" }]);
+    expect(controlState.changes).toEqual([]);
+    expect(controlState.personalized).toBe(false);
+
+    // 3. Signed preview on /for/stripe -> rewrites to /, preserves query params, suppresses sticky & visitor cookies
+    const previewToken = await signPreviewToken({
+      experienceId: "abm-account-page",
+      secret,
+      expiresAt: nowSec + 3600,
+    });
+    const previewUrl = `https://example.com/for/stripe?__facet_preview=abm-account-page&__facet_sig=${encodeURIComponent(previewToken)}`;
+    const previewRes = await middleware(new NextRequest(previewUrl));
+
+    expect(previewRes.headers.get("x-middleware-rewrite")).toBe(
+      `https://example.com/?__facet_preview=abm-account-page&__facet_sig=${encodeURIComponent(previewToken)}`,
+    );
+    const previewState = deserializeFacetState(getForwardedHeader(previewRes, FACET_STATE_HEADER));
+    expect(previewState.previewMode).toBe(true);
+    expect(previewState.matched).toEqual([{ experienceId: "abm-account-page", bucket: "variant" }]);
+    expect(previewState.changes[0]?.text).toBe("Built for Stripe (stripe)");
+    expect(previewRes.cookies.get("__facet_vid")).toBeUndefined();
+    expect(previewRes.cookies.get("__facet_sticky")).toBeUndefined();
+
+    // 4. Advance clock past preview token expiry via `now` -> preview rejected
+    nowSec += 7200;
+    const expiredPreviewRes = await middleware(new NextRequest(previewUrl));
+    const expiredState = deserializeFacetState(
+      getForwardedHeader(expiredPreviewRes, FACET_STATE_HEADER),
+    );
+    expect(expiredState.previewMode).toBe(false);
+  });
+
+  it("buildSafeRewriteUrl strictly enforces same-origin path safety (rejects //, \\\\, ..) and preserves query params", () => {
+    const incoming = new URL("https://example.com/for/stripe?utm_source=linkedin&tag=a&tag=b");
+
+    expect(buildSafeRewriteUrl(incoming, "/")?.toString()).toBe(
+      "https://example.com/?utm_source=linkedin&tag=a&tag=b",
+    );
+    expect(buildSafeRewriteUrl(incoming, "/abm-landing")?.toString()).toBe(
+      "https://example.com/abm-landing?utm_source=linkedin&tag=a&tag=b",
+    );
+    expect(buildSafeRewriteUrl(incoming, "/landing?tpl=abm")?.toString()).toBe(
+      "https://example.com/landing?tpl=abm&utm_source=linkedin&tag=a&tag=b",
+    );
+
+    // Unsafe paths must be rejected
+    expect(buildSafeRewriteUrl(incoming, "//evil.com/phish")).toBeNull();
+    expect(buildSafeRewriteUrl(incoming, "/foo//bar")).toBeNull();
+    expect(buildSafeRewriteUrl(incoming, "/\\evil.com")).toBeNull();
+    expect(buildSafeRewriteUrl(incoming, "/foo%5cbar")).toBeNull();
+    expect(buildSafeRewriteUrl(incoming, "/../etc/passwd")).toBeNull();
+    expect(buildSafeRewriteUrl(incoming, "/a/../b")).toBeNull();
+    expect(buildSafeRewriteUrl(incoming, "/a/%2e%2e/b")).toBeNull();
+    expect(buildSafeRewriteUrl(incoming, "/foo\r\nbar")).toBeNull();
+    expect(buildSafeRewriteUrl(incoming, "https://evil.com/")).toBeNull();
+  });
+
+  it("sets session vs timed sticky cookies with independent TTL (never inheriting cookieOptions.maxAge) and suppresses stickyCookie in previewMode", async () => {
+    const secret = "sticky-preview-secret";
+    const sessionYaml = `
+version: 1
+settings:
+  cookieName: "__facet_vid"
+  stickyCookieName: "__facet_sticky"
+experiences:
+  - id: session-exp
+    name: "Session Sticky"
+    match:
+      utm_campaign: ["launch"]
+    sticky: "session"
+    changes:
+      - selector: "#hero"
+        text: "Launch special"
+`;
+
+    const timedYaml = `
+version: 1
+settings:
+  cookieName: "__facet_vid"
+  stickyCookieName: "__facet_sticky"
+experiences:
+  - id: timed-exp
+    name: "Timed Sticky"
+    match:
+      utm_campaign: ["fintech-q4"]
+    sticky: "30m"
+    changes:
+      - selector: "#hero"
+        text: "Fintech Q4"
+`;
+
+    const customCookieOptions = {
+      maxAge: 60 * 60 * 24 * 365,
+      path: "/app",
+      sameSite: "strict" as const,
+      httpOnly: true,
+      secure: true,
+      domain: "example.com",
+    };
+
+    // 1. Session sticky cookie: maxAge must be omitted (NOT 1 year), while safe cookie attrs are inherited
+    const sessionMiddleware = createFacetMiddleware({
+      config: sessionYaml,
+      previewSecret: secret,
+      cookieOptions: customCookieOptions,
+      generateVisitorId: () => "vis_sess_1",
+      now: () => 1_700_000_000,
+    });
+
+    const sessionRes = await sessionMiddleware(
+      new NextRequest("https://example.com/?utm_campaign=launch"),
+    );
+    const visitorCookie = sessionRes.cookies.get("__facet_vid");
+    const stickySessionCookie = sessionRes.cookies.get("__facet_sticky");
+
+    expect(visitorCookie?.value).toBe("vis_sess_1");
+    expect(visitorCookie?.maxAge).toBe(60 * 60 * 24 * 365);
+
+    expect(stickySessionCookie?.value).toBeTruthy();
+    expect(stickySessionCookie?.maxAge).toBeUndefined();
+    expect(stickySessionCookie?.path).toBe("/app");
+    expect(stickySessionCookie?.sameSite).toBe("strict");
+    expect(stickySessionCookie?.httpOnly).toBe(true);
+    expect(stickySessionCookie?.secure).toBe(true);
+    expect(stickySessionCookie?.domain).toBe("example.com");
+
+    // Verify raw Set-Cookie header for __facet_sticky does NOT contain Max-Age
+    const sessionSetCookies = sessionRes.headers.getSetCookie();
+    const rawStickySession = sessionSetCookies.find((c) => c.startsWith("__facet_sticky="));
+    expect(rawStickySession).toBeTruthy();
+    expect(rawStickySession?.toLowerCase()).not.toContain("max-age=");
+    expect(sessionRes.headers.get("Cache-Control")).toBe(PERSONALIZED_CACHE_CONTROL);
+    expect(sessionRes.headers.get("Vary")).toContain("Cookie");
+
+    // 2. Timed sticky cookie (30m = 1800s): maxAge must be 1800 (NOT 1 year from cookieOptions.maxAge)
+    const timedMiddleware = createFacetMiddleware({
+      config: timedYaml,
+      previewSecret: secret,
+      cookieOptions: customCookieOptions,
+      generateVisitorId: () => "vis_timed_1",
+      now: () => 1_700_000_000,
+    });
+
+    const timedRes = await timedMiddleware(
+      new NextRequest("https://example.com/?utm_campaign=fintech-q4"),
+    );
+    const stickyTimedCookie = timedRes.cookies.get("__facet_sticky");
+    expect(stickyTimedCookie?.value).toBeTruthy();
+    expect(stickyTimedCookie?.maxAge).toBe(1800);
+    expect(stickyTimedCookie?.path).toBe("/app");
+    expect(stickyTimedCookie?.sameSite).toBe("strict");
+    expect(stickyTimedCookie?.domain).toBe("example.com");
+    expect(timedRes.headers.get("Cache-Control")).toBe(PERSONALIZED_CACHE_CONTROL);
+    expect(timedRes.headers.get("Vary")).toContain("Cookie");
+
+    // 3. Preview mode suppresses stickyCookie even on a sticky experience
+    const token = await signPreviewToken({
+      experienceId: "timed-exp",
+      secret,
+      expiresAt: 1_700_003_600,
+    });
+    const previewRes = await timedMiddleware(
+      new NextRequest(
+        `https://example.com/?__facet_preview=timed-exp&__facet_sig=${encodeURIComponent(token)}`,
+      ),
+    );
+    expect(previewRes.cookies.get("__facet_sticky")).toBeUndefined();
+    expect(previewRes.cookies.get("__facet_vid")).toBeUndefined();
+  });
+
+  it("supports multi-page sticky evaluation (/ -> /pricing) and expires cleanly via now()", async () => {
+    const multiPageYaml = `
+version: 1
+settings:
+  cookieName: "__facet_vid"
+  stickyCookieName: "__facet_sticky"
+experiences:
+  - id: home-fintech
+    name: "Homepage Fintech"
+    match:
+      path: "/"
+      utm_campaign: ["fintech-q4"]
+    sticky: "1h"
+    changes:
+      - selector: "#hero"
+        text: "Fintech homepage hero"
+  - id: pricing-fintech
+    name: "Pricing Fintech"
+    match:
+      path: "/pricing"
+      utm_campaign: ["fintech-q4"]
+    sticky: "1h"
+    changes:
+      - selector: "#pricing-cta"
+        text: "Fintech enterprise pricing"
+`;
+
+    let nowSec = 1_700_000_000;
+    const middleware = createFacetMiddleware({
+      config: multiPageYaml,
+      generateVisitorId: () => "vis_multi_1",
+      now: () => nowSec,
+    });
+
+    // Step 1: Visitor lands on /?utm_campaign=fintech-q4
+    const homeRes = await middleware(
+      new NextRequest("https://example.com/?utm_campaign=fintech-q4"),
+    );
+    const homeState = deserializeFacetState(getForwardedHeader(homeRes, FACET_STATE_HEADER));
+    expect(homeState.matched).toEqual([{ experienceId: "home-fintech", bucket: "variant" }]);
+    expect(homeState.changes[0]?.text).toBe("Fintech homepage hero");
+
+    const vid = homeRes.cookies.get("__facet_vid")?.value;
+    const stickyVal = homeRes.cookies.get("__facet_sticky")?.value;
+    expect(vid).toBe("vis_multi_1");
+    expect(stickyVal).toBeTruthy();
+
+    // Step 2: 10 minutes later, visitor navigates to /pricing with no query params (cookies sent)
+    nowSec += 600;
+    const pricingRes = await middleware(
+      new NextRequest("https://example.com/pricing", {
+        headers: {
+          cookie: `__facet_vid=${vid}; __facet_sticky=${stickyVal}`,
+        },
+      }),
+    );
+    const pricingState = deserializeFacetState(getForwardedHeader(pricingRes, FACET_STATE_HEADER));
+    expect(pricingState.matched).toEqual([{ experienceId: "pricing-fintech", bucket: "variant" }]);
+    expect(pricingState.personalized).toBe(true);
+    expect(pricingState.changes[0]?.text).toBe("Fintech enterprise pricing");
+    expect(pricingRes.headers.get("Cache-Control")).toBe(PERSONALIZED_CACHE_CONTROL);
+    expect(pricingRes.headers.get("Vary")).toContain("Cookie");
+
+    // Step 3: 2 hours later (past 1h TTL), sticky attribution expires -> /pricing does not match
+    nowSec += 7200;
+    const expiredRes = await middleware(
+      new NextRequest("https://example.com/pricing", {
+        headers: {
+          cookie: `__facet_vid=${vid}; __facet_sticky=${stickyVal}`,
+        },
+      }),
+    );
+    const expiredState = deserializeFacetState(getForwardedHeader(expiredRes, FACET_STATE_HEADER));
+    expect(expiredState.matched).toEqual([]);
+    expect(expiredState.personalized).toBe(false);
+    expect(expiredRes.headers.get("Cache-Control")).toBeNull();
   });
 });

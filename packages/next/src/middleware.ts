@@ -3,6 +3,7 @@ import {
   PERSONALIZED_CACHE_CONTROL,
   buildContextFromRequest,
   evaluate,
+  normalizeNowSeconds,
   parseFacetYaml,
   parsePreviewParams,
   validateFacetConfig,
@@ -48,6 +49,7 @@ export interface FacetMiddlewareOptions {
   bypassApi?: boolean;
   cookieOptions?: FacetCookieOptions;
   generateVisitorId?: () => string;
+  now?: () => number;
   onError?: (error: unknown, request: NextRequest) => void;
 }
 
@@ -198,6 +200,67 @@ function appendVaryHeader(headers: Headers, value: string): void {
   }
 }
 
+export function buildSafeRewriteUrl(parsedUrl: URL, originPath: string): URL | null {
+  if (
+    !originPath.startsWith("/") ||
+    originPath.startsWith("//") ||
+    originPath.includes("\\") ||
+    /[\r\n]/.test(originPath)
+  ) {
+    return null;
+  }
+
+  const pathnamePart = originPath.split(/[?#]/, 1)[0] ?? "";
+  if (
+    pathnamePart.length === 0 ||
+    pathnamePart.includes("//") ||
+    /(^|\/)\.\.(\/|$)/.test(pathnamePart)
+  ) {
+    return null;
+  }
+
+  const decodedPathname = safeDecodeURIComponent(pathnamePart);
+  if (
+    decodedPathname.includes("\\") ||
+    decodedPathname.includes("//") ||
+    /(^|\/)\.\.(\/|$)/.test(decodedPathname)
+  ) {
+    return null;
+  }
+
+  try {
+    const rewriteUrl = new URL(originPath, parsedUrl.origin);
+    if (rewriteUrl.origin !== parsedUrl.origin) {
+      return null;
+    }
+    if (
+      !rewriteUrl.pathname.startsWith("/") ||
+      rewriteUrl.pathname.includes("//") ||
+      /(^|\/)\.\.(\/|$)/.test(rewriteUrl.pathname)
+    ) {
+      return null;
+    }
+
+    if (rewriteUrl.search.length === 0) {
+      rewriteUrl.search = parsedUrl.search;
+    } else if (parsedUrl.search.length > 0) {
+      const merged = new URLSearchParams(rewriteUrl.search);
+      const existingKeys = new Set(merged.keys());
+      for (const [key, value] of parsedUrl.searchParams.entries()) {
+        if (!existingKeys.has(key)) {
+          merged.append(key, value);
+        }
+      }
+      const queryString = merged.toString();
+      rewriteUrl.search = queryString.length > 0 ? `?${queryString}` : "";
+    }
+
+    return rewriteUrl;
+  } catch {
+    return null;
+  }
+}
+
 function parseOrValidateConfig(raw: FacetConfig | string): FacetConfig {
   if (typeof raw === "string") {
     const parsed = parseFacetYaml(raw);
@@ -326,6 +389,10 @@ export function createFacetMiddleware(options: FacetMiddlewareOptions): FacetNex
       if (options.generateVisitorId !== undefined) {
         evaluateOptions.generateVisitorId = options.generateVisitorId;
       }
+      const nowValue = options.now !== undefined ? options.now() : undefined;
+      if (nowValue !== undefined) {
+        evaluateOptions.now = nowValue;
+      }
 
       const previewParams = parsePreviewParams(parsedUrl, {
         previewParam: config.settings.previewParam,
@@ -345,6 +412,7 @@ export function createFacetMiddleware(options: FacetMiddlewareOptions): FacetNex
           token: previewParams.signature,
           secret: options.previewSecret,
           ...(previewParams.bucket !== undefined ? { bucket: previewParams.bucket } : {}),
+          ...(nowValue !== undefined ? { now: normalizeNowSeconds(nowValue) } : {}),
         });
 
         if (verification.valid) {
@@ -389,35 +457,59 @@ export function createFacetMiddleware(options: FacetMiddlewareOptions): FacetNex
         );
       }
 
-      const response = NextResponse.next({
-        request: { headers: sanitizedHeaders },
-      });
+      const rewriteUrl =
+        result.originPath !== null ? buildSafeRewriteUrl(parsedUrl, result.originPath) : null;
 
-      const shouldSetCookie =
+      const response =
+        rewriteUrl !== null
+          ? NextResponse.rewrite(rewriteUrl, {
+              request: { headers: sanitizedHeaders },
+            })
+          : NextResponse.next({
+              request: { headers: sanitizedHeaders },
+            });
+
+      const shouldSetVisitorCookie =
         result.isNewVisitor &&
         !result.previewMode &&
         config.experiences.length > 0 &&
         result.visitorId.length > 0;
 
+      const stickyCookie = !result.previewMode ? result.stickyCookie : null;
+      const shouldSetStickyCookie =
+        stickyCookie !== null && stickyCookie.name.length > 0 && stickyCookie.value.length > 0;
+
       if (
         result.cacheControl !== null ||
         result.personalized ||
         result.previewMode ||
-        shouldSetCookie
+        shouldSetVisitorCookie ||
+        shouldSetStickyCookie
       ) {
         response.headers.set("Cache-Control", PERSONALIZED_CACHE_CONTROL);
         appendVaryHeader(response.headers, "Cookie");
       }
 
-      if (shouldSetCookie) {
-        const cookieOpts = options.cookieOptions;
+      const cookieOpts = options.cookieOptions;
+      const commonCookieAttrs = {
+        path: cookieOpts?.path ?? "/",
+        sameSite: cookieOpts?.sameSite ?? "lax",
+        httpOnly: cookieOpts?.httpOnly ?? true,
+        secure: cookieOpts?.secure ?? parsedUrl.protocol === "https:",
+        ...(cookieOpts?.domain !== undefined ? { domain: cookieOpts.domain } : {}),
+      };
+
+      if (shouldSetVisitorCookie) {
         response.cookies.set(config.settings.cookieName, result.visitorId, {
-          path: cookieOpts?.path ?? "/",
+          ...commonCookieAttrs,
           maxAge: cookieOpts?.maxAge ?? DEFAULT_COOKIE_MAX_AGE_SECONDS,
-          sameSite: cookieOpts?.sameSite ?? "lax",
-          httpOnly: cookieOpts?.httpOnly ?? true,
-          secure: cookieOpts?.secure ?? parsedUrl.protocol === "https:",
-          ...(cookieOpts?.domain !== undefined ? { domain: cookieOpts.domain } : {}),
+        });
+      }
+
+      if (shouldSetStickyCookie) {
+        response.cookies.set(stickyCookie.name, stickyCookie.value, {
+          ...commonCookieAttrs,
+          ...(stickyCookie.maxAgeSeconds !== null ? { maxAge: stickyCookie.maxAgeSeconds } : {}),
         });
       }
 
