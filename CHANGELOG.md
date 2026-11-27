@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Live Config Store & 1-Click Rollback (v0.3):**
+  - **`@facet/core`:** Added `ConfigStore` interface, `createMemoryConfigStore`, `hashConfigYaml`, `generateSnapshotId`, and bounded snapshot history (`DEFAULT_MAX_SNAPSHOTS = 20`) using pure Web Standard APIs.
+  - **`@facet/worker`:** Added `createKvConfigStore` (Zod-validated `saveDraft`, `publish`, `rollback` with bounded snapshot pruning) and `createCachedConfigLoader` (TTL + stale-while-revalidate via `waitUntil`, request deduplication, and strict fail-open fallback).
+  - **`@facet/next`:** Added `createRemoteConfigLoader` for `createFacetMiddleware({ config })` supporting remote URLs, `ConfigStore`, or custom fetchers with a hard cold-load timeout (`1500ms` default), warm SWR refresh, and strict fail-open fallback.
+- **`@facet/studio` (v0.3 self-hosted marketer UI):**
+  - Self-hosted React admin UI + Web Standard API server (`createStudioHandler`, `startStudioServer`, `createFileConfigStore`, `facet-studio` CLI) with visual experience editing, CSV account table import, real-time `@facet/core` validation, HMAC-SHA256 preview link generation, publish/draft workflow, 1-click snapshot rollback, and fail-closed auth.
+- **`@facet/sync` (v0.3 spreadsheet & database sync):**
+  - Pure Web Standard sync engine (`syncFacetConfig`, `compileCampaignRows`, `compileAccountTableRows`) with row-level Zod validation and prototype-pollution guards.
+  - Built-in sources for **Google Sheets** (published RFC-4180 CSV & API v4), **Airtable** (paginated), and **Notion** (paginated database query + property extraction).
+  - Built-in targets for **Cloudflare KV** snapshots (`createCloudflareKvTarget`) and automated **GitHub PRs** (`createGitHubPrTarget`).
+- **PR Preview Bot (`@facet/cli` & GitHub Actions, v0.3):**
+  - Added `facet pr-comment` CLI subcommand (`runPrCommentCommand`, `generatePrCommentMarkdown`, `diffFacetExperiences`, `buildPrCommentReport`) to validate `facet.yaml`, diff Added/Modified/Removed/Unchanged experiences against `--base` (including referenced `settings.slots` and `data` tables), and generate sticky Markdown tables (`<!-- facet-pr-preview -->`) or `--json` output with HMAC-SHA256 signed Variant/Control preview links.
+  - Added ready-to-copy least-privilege GitHub Actions workflow at `examples/github-actions/facet-pr-preview.yml`.
 - **`@facet/core` (v0.2 engine features):**
   - **Virtual ABM URLs (`originPath`):** Experiences can specify a safe relative `originPath` (e.g. `originPath: "/"` for `/for/:acct`), exposed as `EvaluationResult.originPath` (interpolated and guarded against `//`, backslashes, newlines, and `..` path traversal).
   - **Named path parameters (`:param`):** `match.path` now supports named segments (e.g. `/for/:acct`, `/:locale/pricing/**`) alongside exact paths and globs, exporting `matchPathPattern`, `matchesPathValue`, `matchesConditionWithParams`, and `extractPathParams`.

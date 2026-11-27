@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 import { runInitCommand } from "./commands/init.js";
+import { runPrCommentCommand } from "./commands/pr-comment.js";
 import { isPreviewBucket, runPreviewLinkCommand } from "./commands/preview-link.js";
 import { runPreviewCommand } from "./commands/preview.js";
 import { runSchemaCommand } from "./commands/schema.js";
@@ -16,6 +17,7 @@ Commands:
   validate        Validate facet.yaml schema, selectors, and rule sanity
   preview         Start a local reverse proxy with live reload & preview bar
   preview-link    Generate a signed shareable preview URL for an experience
+  pr-comment      Generate a GitHub PR comment with signed preview links
   schema          Export the facet.yaml JSON Schema (Draft 2020-12)
 
 Global Options:
@@ -68,6 +70,22 @@ Options:
   --bucket <bucket>      Preview bucket: variant | control | default
   --ttl <seconds>        Link expiration TTL in seconds
   --config <path>        Path to facet.yaml for experience lookup (default: ./facet.yaml)
+  -h, --help             Show this help message
+`,
+  "pr-comment": `Usage: facet pr-comment [configPath] --url <siteUrl> [options]
+
+Validate facet.yaml, optionally diff against a base config, and generate a
+GitHub PR comment with HMAC-SHA256 signed preview links.
+
+Arguments:
+  configPath             Path to facet.yaml (default: facet.yaml)
+
+Options:
+  --url <siteUrl>        Target site URL for preview links (required)
+  --secret <secret>      HMAC signing secret (falls back to FACET_PREVIEW_SECRET)
+  --base <path>          Base branch facet.yaml path to diff against
+  --ttl <seconds>        Link expiration TTL in seconds (default: 604800 / 7 days)
+  --json                 Output structured JSON (including rendered markdown)
   -h, --help             Show this help message
 `,
   schema: `Usage: facet schema [options]
@@ -260,6 +278,63 @@ export async function runCli(argv: readonly string[], options?: RunCliOptions): 
           ...(rawBucket !== undefined ? { bucket: rawBucket } : {}),
           ...(ttl !== undefined ? { ttl } : {}),
           ...(configPath !== undefined ? { configPath, configExplicit: true } : {}),
+        },
+        io,
+      );
+      return result.exitCode;
+    }
+
+    case "pr-comment": {
+      let parsed: ReturnType<typeof parseArgs>;
+      try {
+        parsed = parseArgs({
+          args: rest,
+          options: {
+            url: { type: "string" },
+            secret: { type: "string" },
+            base: { type: "string" },
+            ttl: { type: "string" },
+            json: { type: "boolean", default: false },
+            help: { type: "boolean", short: "h", default: false },
+          },
+          allowPositionals: true,
+        });
+      } catch (err) {
+        io.stderr(`Error: ${err instanceof Error ? err.message : String(err)}\n`);
+        return 1;
+      }
+
+      if (parsed.values.help === true) {
+        io.stdout(COMMAND_HELP["pr-comment"] ?? MAIN_HELP);
+        return 0;
+      }
+
+      const configPath = parsed.positionals[0];
+      const url = typeof parsed.values.url === "string" ? parsed.values.url : "";
+      const secret = typeof parsed.values.secret === "string" ? parsed.values.secret : undefined;
+      const baseConfigPath =
+        typeof parsed.values.base === "string" ? parsed.values.base : undefined;
+      const rawTtl = typeof parsed.values.ttl === "string" ? parsed.values.ttl : undefined;
+
+      let ttl: number | undefined;
+      if (rawTtl !== undefined) {
+        if (!/^\d+$/.test(rawTtl)) {
+          io.stderr(
+            `Error: Invalid --ttl "${rawTtl}". Expected a positive integer number of seconds.\n`,
+          );
+          return 1;
+        }
+        ttl = Number(rawTtl);
+      }
+
+      const result = await runPrCommentCommand(
+        {
+          ...(configPath !== undefined ? { configPath } : {}),
+          url,
+          ...(secret !== undefined ? { secret } : {}),
+          ...(baseConfigPath !== undefined ? { baseConfigPath } : {}),
+          ...(ttl !== undefined ? { ttl } : {}),
+          json: parsed.values.json === true,
         },
         io,
       );

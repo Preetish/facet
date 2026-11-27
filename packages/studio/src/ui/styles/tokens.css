@@ -1,0 +1,143 @@
+:root {
+  /* Palette — Sunlit Editorial Pressroom (DESIGN.md) */
+  --alabaster: #fafaf7;
+  --warm-stone: #f3f1ea;
+  --sheet-white: #ffffff;
+  --linen-tint: #f6f5f0;
+
+  --ink: #14191f;
+  --ink-2: #475467;
+  --ink-3: #596574;
+
+  --border: #dcd9cf;
+  --border-subtle: #e8e5dc;
+  --border-strong: #c4c0b4;
+
+  --pine: #116b4b;
+  --pine-hover: #0c543a;
+  --pine-wash: #e8efe9;
+  --pine-border: #b8d3c4;
+  --prism-mint: #cce3d6;
+  --on-pine: #ffffff;
+
+  --ochre-wash: #fef3c7;
+  --ochre-border: #e2b857;
+  --ochre-ink: #7c4700;
+  --ochre-bar: #d98b18;
+
+  --error: #b42318;
+  --error-wash: #fef3f2;
+  --error-border: #f3c4be;
+
+  /* Typography */
+  --font-display: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --font-body: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* Radii */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-pill: 9999px;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 150ms;
+  --dur-med: 220ms;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--alabaster);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background-color: var(--pine-wash);
+  color: var(--ink);
+}
+
+input,
+textarea,
+select,
+button {
+  font-family: inherit;
+  color: inherit;
+}
+
+input,
+textarea {
+  caret-color: var(--pine);
+}
+
+:focus-visible {
+  outline: 2px solid var(--pine);
+  outline-offset: 2px;
+}
+
+a {
+  color: var(--pine);
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  color: var(--pine-hover);
+}
+
+/* Subtle themed scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: var(--border-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

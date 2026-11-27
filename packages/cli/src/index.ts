@@ -30,6 +30,26 @@ export type {
   PreviewLinkCommandResult,
 } from "./commands/preview-link.js";
 
+export {
+  DEFAULT_PR_PREVIEW_TTL_SECONDS,
+  PR_COMMENT_MARKER,
+  buildPrCommentReport,
+  diffFacetExperiences,
+  generatePrCommentMarkdown,
+  runPrCommentCommand,
+} from "./commands/pr-comment.js";
+export type {
+  BuildPrCommentReportOptions,
+  ExperienceDiffItem,
+  GeneratePrCommentMarkdownOptions,
+  PrCommentCommandOptions,
+  PrCommentCommandResult,
+  PrCommentExperienceEntry,
+  PrCommentExperienceStatus,
+  PrCommentReport,
+  PrCommentSummary,
+} from "./commands/pr-comment.js";
+
 export { runPreviewCommand } from "./commands/preview.js";
 export type { PreviewCommandOptions, PreviewCommandResult } from "./commands/preview.js";
 

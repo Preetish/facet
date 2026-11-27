@@ -91,6 +91,7 @@ Produces an HMAC-SHA256 signed URL (`?__facet_preview=fintech-abm&__facet_bucket
 | `facet validate [configPath]`                                                                                                           | Validate `facet.yaml` schema, CSS selectors, and rule sanity     |
 | `facet preview --target <url> [--config <path>] [--port <n>] [--host <h>]`                                                              | Start the local reverse proxy with live reload & Preview Bar     |
 | `facet preview-link <experienceId> --url <siteUrl> [--secret <s>] [--bucket variant\|control\|default] [--ttl <sec>] [--config <path>]` | Generate an HMAC-SHA256 signed shareable preview URL             |
+| `facet pr-comment [configPath] --url <siteUrl> [--base <path>] [--secret <s>] [--ttl <sec>] [--json]`                                   | Validate, diff vs base, and generate a PR preview comment table  |
 | `facet schema [--out <path>]`                                                                                                           | Export the Draft 2020-12 JSON Schema for `facet.yaml`            |
 
 ---
@@ -351,14 +352,61 @@ export default async function HomePage() {
 
 ---
 
+## Marketer & Team Workflows (v0.3)
+
+Facet stays git-native and config-as-code while giving growth teams zero-git workflows when they need them:
+
+### Self-Hosted Marketer Studio (`@facet/studio`)
+
+Run a lightweight self-hosted admin UI locally (`npx facet-studio --config ./facet.yaml`) or mount `createStudioHandler()` on Cloudflare Workers / Node behind your own auth:
+
+- Visual experience editor, match-rule builder, and CSV account table importer (`data.*`).
+- Real-time Zod + template validation (`parseFacetYaml` + `validateTemplateSyntax`), HMAC-SHA256 signed preview links, publish, and **1-click snapshot rollback**.
+- Fail-closed authentication guard (`requireAuth` / `authenticate`), `Cache-Control: private, no-store`, and zero client secret exposure.
+
+### Spreadsheet & Database Sync (`@facet/sync`)
+
+Let marketers edit campaigns or 1:1 ABM account lists in **Google Sheets** (published CSV or API v4), **Airtable**, or **Notion**, and sync them with row-level Zod validation (bad rows are skipped and reported without ever corrupting live config):
+
+```ts
+import { createCloudflareKvTarget, createGoogleSheetsSource, syncFacetConfig } from "@facet/sync";
+
+await syncFacetConfig({
+  source: createGoogleSheetsSource({ csvUrl: process.env.CAMPAIGNS_CSV_URL! }),
+  target: createCloudflareKvTarget({ kv: env.FACET_CONFIG_KV }),
+});
+```
+
+Supports publishing directly to **Cloudflare KV** (`createCloudflareKvTarget`) with bounded snapshot history or opening an automated **GitHub Pull Request** (`createGitHubPrTarget`).
+
+### Live Remote Config & 1-Click Rollback
+
+Publish validated config updates without redeploying your edge worker or Next.js app:
+
+- **`@facet/core`:** `ConfigStore` interface, `createMemoryConfigStore`, `hashConfigYaml`, and bounded snapshot history (default 20 snapshots).
+- **`@facet/worker`:** `createKvConfigStore` + `createCachedConfigLoader` with TTL + stale-while-revalidate (`ctx.waitUntil`) and strict fail-open fallback to last-known-good config.
+- **`@facet/next`:** `createRemoteConfigLoader` compatible with `createFacetMiddleware({ config })`, enforcing a hard cold-load timeout (`1500ms` default) with warm SWR refresh and fail-open fallback.
+
+### GitHub PR Preview Bot (`facet pr-comment`)
+
+Copy [`examples/github-actions/facet-pr-preview.yml`](./examples/github-actions/facet-pr-preview.yml) to `.github/workflows/facet-pr-preview.yml`. On every PR that modifies `facet.yaml`, it:
+
+1. Validates `facet.yaml` (failing CI with line-accurate errors if invalid).
+2. Diffs against the base branch (`--base`) to flag **Added**, **Modified** (including slot/data changes), **Removed**, and **Unchanged** experiences.
+3. Posts or updates a sticky PR comment (`<!-- facet-pr-preview -->`) with HMAC-SHA256 signed **Variant** and **Control** preview links.
+
+---
+
 ## Packages
 
-| Package                              | Description                                                    | Key Exports                                                                                                                                                                                                                                              |
-| ------------------------------------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@facet/core`](./packages/core)     | Pure, zero-I/O TypeScript engine (Web Standard APIs only)      | `parseFacetYaml`, `validateFacetConfig`, `exportFacetJsonSchema`, `evaluate`, `assignBucket`, `buildContextFromRequest`, `parseCsvTable`, `interpolateTemplate`, `validateTemplateSyntax`, `parseStickyCookie`, `signPreviewToken`, `verifyPreviewToken` |
-| [`@facet/worker`](./packages/worker) | Cloudflare Worker reverse proxy using streaming `HTMLRewriter` | `createFacetWorker`, `handleFacetRequest`, `createIpinfoAdapter`, `createWebhookEnrichmentAdapter`, `runEnrichment`, `rewriteHtmlResponse`                                                                                                               |
-| [`@facet/cli`](./packages/cli)       | Local CLI & live preview proxy with Preview Bar                | `facet init`, `facet validate`, `facet preview`, `facet preview-link`, `facet schema`                                                                                                                                                                    |
-| [`@facet/next`](./packages/next)     | Hydration-safe Next.js Middleware & Server Components          | `createFacetMiddleware`, `readFacetState`, `FacetSlot`, `FacetAnalytics`                                                                                                                                                                                 |
+| Package                              | Description                                                                | Key Exports                                                                                                                                                                                                                                                                         |
+| ------------------------------------ | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@facet/core`](./packages/core)     | Pure, zero-I/O TypeScript engine (Web Standard APIs only)                  | `parseFacetYaml`, `validateFacetConfig`, `exportFacetJsonSchema`, `evaluate`, `assignBucket`, `buildContextFromRequest`, `parseCsvTable`, `interpolateTemplate`, `validateTemplateSyntax`, `parseStickyCookie`, `signPreviewToken`, `verifyPreviewToken`, `createMemoryConfigStore` |
+| [`@facet/worker`](./packages/worker) | Cloudflare Worker reverse proxy using streaming `HTMLRewriter`             | `createFacetWorker`, `handleFacetRequest`, `createKvConfigStore`, `createCachedConfigLoader`, `createIpinfoAdapter`, `createWebhookEnrichmentAdapter`, `runEnrichment`, `rewriteHtmlResponse`                                                                                       |
+| [`@facet/cli`](./packages/cli)       | Local CLI, live preview proxy with Preview Bar, and PR preview comment bot | `facet init`, `facet validate`, `facet preview`, `facet preview-link`, `facet pr-comment`, `facet schema`                                                                                                                                                                           |
+| [`@facet/next`](./packages/next)     | Hydration-safe Next.js Middleware & Server Components                      | `createFacetMiddleware`, `createRemoteConfigLoader`, `readFacetState`, `FacetSlot`, `FacetAnalytics`                                                                                                                                                                                |
+| [`@facet/sync`](./packages/sync)     | Zero-SDK spreadsheet/database sync (Google Sheets, Airtable, Notion)       | `syncFacetConfig`, `compileCampaignRows`, `compileAccountTableRows`, `createGoogleSheetsSource`, `createAirtableSource`, `createNotionSource`, `createCloudflareKvTarget`, `createGitHubPrTarget`                                                                                   |
+| [`@facet/studio`](./packages/studio) | Self-hosted marketer admin UI & Web Standard API server                    | `facet-studio`, `createStudioHandler`, `startStudioServer`, `createFileConfigStore`, `validateFacetYamlFull`                                                                                                                                                                        |
 
 ---
 
@@ -376,7 +424,7 @@ export default async function HomePage() {
 
 ```bash
 npm install           # Install workspace dependencies
-npm run build         # Compile all packages (@facet/core, worker, cli, next)
+npm run build         # Compile all packages (core, worker, cli, next, sync, studio)
 npm run typecheck     # Run strict TypeScript checks across all workspaces
 npm test              # Run the Vitest suite
 npm run lint          # Run ESLint

@@ -143,3 +143,20 @@ export type { ResolvedChange } from "./transforms.js";
 
 export { buildAnalyticsSnippet, safeJsonForScript, toAnalyticsExposures } from "./analytics.js";
 export type { AnalyticsExposure } from "./analytics.js";
+
+export {
+  DEFAULT_MAX_SNAPSHOTS,
+  createMemoryConfigStore,
+  generateSnapshotId,
+  hashConfigYaml,
+  normalizeMaxSnapshots,
+} from "./store.js";
+export type {
+  ConfigSnapshot,
+  ConfigSnapshotMeta,
+  ConfigStore,
+  MemoryConfigStoreOptions,
+  PublishOptions,
+  PublishResult,
+  SaveDraftResult,
+} from "./store.js";

@@ -26,3 +26,10 @@ export type { FacetSlotElement, FacetSlotProps } from "./FacetSlot.js";
 
 export { FacetAnalytics } from "./FacetAnalytics.js";
 export type { FacetAnalyticsProps } from "./FacetAnalytics.js";
+
+export {
+  DEFAULT_REMOTE_CONFIG_TIMEOUT_MS,
+  DEFAULT_REMOTE_CONFIG_TTL_MS,
+  createRemoteConfigLoader,
+} from "./remote-config.js";
+export type { RemoteConfigLoaderOptions } from "./remote-config.js";

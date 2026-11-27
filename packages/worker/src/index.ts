@@ -40,3 +40,11 @@ export type {
   RunEnrichmentOptions,
   WebhookEnrichmentAdapterOptions,
 } from "./enrichment.js";
+
+export {
+  DEFAULT_CONFIG_CACHE_TTL_MS,
+  DEFAULT_KV_CONFIG_KEY_PREFIX,
+  createCachedConfigLoader,
+  createKvConfigStore,
+} from "./config-store.js";
+export type { CachedConfigLoaderOptions, KvConfigStoreOptions } from "./config-store.js";
